@@ -9,23 +9,24 @@ from botocore.exceptions import ClientError
 from PIL import Image
 from io import BytesIO
 
-r2_transient_account = os.getenv("R2_TRANSIENT_ACCOUNT", "https://a223539ccf6caa2d76459c9727d276e6.r2.cloudflarestorage.com")
-r2_permanent_account = os.getenv("R2_PERMANENT_ACCOUNT", "https://a223539ccf6caa2d76459c9727d276e6.r2.cloudflarestorage.com")
 r2_transient_bucket = os.getenv("R2_TRANSIENT_BUCKET", "stable-horde")
 r2_permanent_bucket = os.getenv("R2_PERMANENT_BUCKET", "stable-horde")
 r2_source_image_bucket = os.getenv("R2_SOURCE_IMAGE_BUCKET", "stable-horde-source-images")
 
-s3_client = boto3.client('s3', endpoint_url=r2_transient_account)
-s3_client_shared = boto3.client('s3', 
-    endpoint_url=r2_permanent_account,
-    aws_access_key_id=os.getenv('SHARED_AWS_ACCESS_ID'),
-    aws_secret_access_key=os.getenv('SHARED_AWS_ACCESS_KEY'),
-)
-old_r2 = boto3.client('s3', 
-    endpoint_url="https://eu2.contabostorage.com",
-    aws_access_key_id=os.getenv('OLD_AWS_ACCESS_KEY_ID'),
-    aws_secret_access_key=os.getenv('OLD_AWS_SECRET_ACCESS_KEY'),
-)
+if(not os.getenv("HORDE_DEV", 0)):
+    r2_transient_account = os.getenv("R2_TRANSIENT_ACCOUNT", "https://a223539ccf6caa2d76459c9727d276e6.r2.cloudflarestorage.com")
+    r2_permanent_account = os.getenv("R2_PERMANENT_ACCOUNT", "https://edf800e28a742a836054658825faa135.r2.cloudflarestorage.com")
+
+
+    s3_client = boto3.client('s3', endpoint_url=r2_transient_account)
+    s3_client_shared = boto3.client('s3', 
+        endpoint_url=r2_permanent_account,
+        aws_access_key_id=os.getenv('SHARED_AWS_ACCESS_ID'),
+        aws_secret_access_key=os.getenv('SHARED_AWS_ACCESS_KEY'),
+    )
+else:
+    s3_client = boto3.client('s3')
+    s3_client_shared = s3_client
 
 # Lists shared bucket contents
 # for key in s3_client_shared.list_objects(Bucket=r2_transient_bucket)['Contents']:
@@ -70,8 +71,6 @@ def generate_procgen_download_url(procgen_id, shared = False):
     client = s3_client
     if shared:
         client = s3_client_shared
-    # if not file_exists(client,  f"{procgen_id}.webp"):
-    #     client = old_r2
     return generate_presigned_url(
         client = client,
         client_method = "get_object",
@@ -84,7 +83,6 @@ def delete_procgen_image(procgen_id):
         Bucket=r2_transient_bucket,
         Key=f"{procgen_id}.webp"
     )
-
 
 def delete_source_image(source_image_uuid):
     response = s3_client.delete_object(
@@ -106,8 +104,6 @@ def upload_image(client, bucket, image, filename, quality=100):
     return generate_img_download_url(filename, r2_source_image_bucket)
 
 def download_image(client, bucket, key):
-    # if not file_exists(client, f"{procgen_id}.webp"):
-    #     client = old_r2
     try:
         response = client.get_object(Bucket=bucket, Key=key)
         img = response['Body'].read()
@@ -172,10 +168,11 @@ def upload_prompt(prompt_dict):
     with open(filename, "w") as f:
         f.write(json_object)
     try:
-        response = s3_client.upload_file(
-            filename, "prompts", filename
+        response = s3_client_shared.upload_file(
+            filename, "temp-storage", filename
         )
         os.remove(filename)
+        logger.debug(response)
     except ClientError as e:
         logger.error(f"Error encountered while uploading prompt {filename}: {e}")
         return False
@@ -193,15 +190,11 @@ def generate_uuid_img_upload_url(img_uuid, imgtype):
 def generate_uuid_img_download_url(img_uuid, imgtype):
     return generate_img_download_url(f"{img_uuid}.{imgtype}")
 
-def check_file(client, bucket, filename):
+def check_file(client, filename):
     try:
-        return client.head_object(Bucket=bucket, Key=filename)
+        return client.head_object(Bucket=r2_transient_bucket, Key=filename)
     except ClientError as e:
         return int(e.response['Error']['Code']) != 404
 
 def check_shared_image(filename):
-    return type(check_file(s3_client_shared,r2_transient_bucket,filename)) == dict
-
-def file_exists(client, bucket, filename):
-    # If the return of check_file is an int, it means it encountered an error
-    return type(check_file(client, bucket, filename)) != int
+    return type(check_file(s3_client_shared,filename)) == dict

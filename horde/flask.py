@@ -22,7 +22,7 @@ else:
         "max_overflow": -1,
     }
 HORDE.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(HORDE)
+db = SQLAlchemy()
 db.init_app(HORDE)
 
 if not SQLITE_MODE:

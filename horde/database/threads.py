@@ -271,7 +271,15 @@ def prune_stats():
 
 @logger.catch(reraise=True)
 def store_patreon_members():
-    api_client = patreon.API(os.getenv("PATREON_CREATOR_ACCESS_TOKEN"))
+    access_token = os.getenv("PATREON_CREATOR_ACCESS_TOKEN", "")
+    if access_token == "":
+        return
+    try:
+        api_client = patreon.API(access_token)
+    except Exception as e:
+        logger.error(f"Patreon failed with exception: {e}")
+        return
+
     # campaign_id = api_client.get_campaigns(10).data()[0].id()
     cursor = None
     members = []

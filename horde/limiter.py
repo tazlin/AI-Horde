@@ -16,7 +16,7 @@ if is_redis_up():
             storage_uri=ger_limiter_url(),
             # storage_options={"connect_timeout": 30},
             strategy="fixed-window", # or "moving-window"
-            default_limits=["90 per minute"],
+            default_limits=["180 per minute"],
             headers_enabled=True
         )
         logger.init_ok("Limiter Cache", status="Connected")
@@ -28,7 +28,7 @@ if limiter is None:
     limiter = Limiter(
         HORDE,
         key_func=get_remote_address,
-        default_limits=["90 per minute"],
+        default_limits=["180 per minute"],
         headers_enabled=True
     )
     logger.init_warn("Limiter Cache", status="Memory Only")
