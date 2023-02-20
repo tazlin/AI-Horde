@@ -1,0 +1,15 @@
+files: 'horde/'
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+    -   id: check-yaml
+    -   id: mixed-line-ending
+    -   id: end-of-file-fixer
+    -   id: trailing-whitespace
+    -   id: detect-aws-credentials
+    -   id: detect-private-key
+-   repo: https://github.com/charliermarsh/ruff
+    rev: v0.0.247
+    hooks:
+    -   id: ruff

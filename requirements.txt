@@ -23,5 +23,6 @@ psycopg2-binary
 boto3
 regex
 unidecode
-git+https://github.com/Patreon/patreon-python.git
+patreon @ git+https://github.com/Patreon/patreon-python.git
 cachetools
+pre-commit

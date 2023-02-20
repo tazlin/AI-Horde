@@ -1,2 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+dynamic = ["dependencies"]
+name = "horde"
+version = "4.0.0"
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+kobold = ["transformers", "accelerate"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["horde*"]  
+namespaces = false
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
 [tool.ruff]
 line-length = 500
