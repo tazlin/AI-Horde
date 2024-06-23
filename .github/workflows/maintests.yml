@@ -77,6 +77,7 @@ jobs:
           git clone https://github.com/Haidra-Org/horde-sdk.git --single-branch --branch better-tests
           cd horde-sdk
           pytest tests/ --ignore-glob=*api_calls.py --ignore-glob=*test_model_meta.py -s
+          pytest tests/ -m "api_side_ci"
   
   lint-check-job:
     runs-on: ubuntu-latest
