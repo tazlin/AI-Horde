@@ -82,8 +82,10 @@ jobs:
           psql -h localhost -U postgres -d postgres -c "TRUNCATE TABLE waiting_prompts CASCADE;"
 
           git clone https://github.com/Haidra-Org/horde-sdk.git --single-branch --branch better-tests
-          pytest horde-sdk/tests/ --ignore-glob=*api_calls.py --ignore-glob=*test_model_meta.py -s
-          pytest horde-sdk/tests/ -m "api_side_ci"
+          
+          cd horde-sdk
+          pytest ./tests/ --ignore-glob=*api_calls.py --ignore-glob=*test_model_meta.py -s
+          pytest ./tests/ -m "api_side_ci"
   
   lint-check-job:
     runs-on: ubuntu-latest
