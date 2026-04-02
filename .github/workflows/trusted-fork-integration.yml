@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: 2026 Tazlin
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: AI-Horde trusted fork integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to test
+        required: true
+        type: number
+      run_horde_sdk_tests:
+        description: Also run horde_sdk downstream tests
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: trusted-fork-integration-${{ inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-and-validate-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      head_repo_full_name: ${{ steps.pr.outputs.head_repo_full_name }}
+      merge_ref: ${{ steps.pr.outputs.merge_ref }}
+    steps:
+      - name: Resolve PR metadata and enforce guardrails
+        id: pr
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed(`Invalid pr_number: ${process.env.PR_NUMBER}`);
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const labels = (pr.labels || []).map((l) => l.name);
+            const isFork = pr.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`;
+
+            core.info(`PR #${pr.number}: ${pr.title}`);
+            core.info(`Head: ${pr.head.repo.full_name}@${pr.head.sha}`);
+            core.info(`Labels: ${labels.join(", ")}`);
+            core.info(`Merge ref: refs/pull/${pr.number}/merge`);
+
+            if (!labels.includes("allow-ci")) {
+              core.setFailed('PR must have the "allow-ci" label.');
+              return;
+            }
+            if (!isFork) {
+              core.setFailed("This workflow is only for fork PRs. Same-repo PRs run integration tests automatically.");
+              return;
+            }
+
+            core.setOutput("head_sha", pr.head.sha);
+            core.setOutput("head_repo_full_name", pr.head.repo.full_name);
+            core.setOutput("merge_ref", `refs/pull/${pr.number}/merge`);
+
+  runner-job:
+    runs-on: ubuntu-latest
+    needs: resolve-and-validate-pr
+    env:
+      POSTGRES_URL: "localhost:5432/postgres"
+      PGUSER: "postgres"
+      PGPASSWORD: "postgres"
+      REDIS_IP: "localhost"
+      REDIS_SERVERS: '["localhost"]'
+      USE_SQLITE: 0
+      ADMINS: '["test_user#1"]'
+      R2_TRANSIENT_ACCOUNT: ${{ secrets.R2_TRANSIENT_ACCOUNT }}
+      R2_PERMANENT_ACCOUNT: ${{ secrets.R2_PERMANENT_ACCOUNT }}
+      SHARED_AWS_ACCESS_ID: ${{ secrets.SHARED_AWS_ACCESS_ID }}
+      SHARED_AWS_ACCESS_KEY: ${{ secrets.SHARED_AWS_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      KUDOS_TRUST_THRESHOLD: 100
+      AI_HORDE_DEV_URL: "http://localhost:7001/api/"
+
+    services:
+      redis:
+        image: redis
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+      ai-horde-postgres:
+        image: ghcr.io/haidra-org/ai-horde-postgres:latest
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.resolve-and-validate-pr.outputs.merge_ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: python -m pip install --upgrade pip wheel setuptools
+      - name: Install and run tests
+        run: |
+          python -m pip install -r requirements.txt -r requirements.dev.txt
+          python server.py -vvvvi --horde stable &
+          timeout=120
+          while ! curl -sf http://localhost:7001/api/v2/status/heartbeat > /dev/null 2>&1; do
+            timeout=$((timeout - 2))
+            if [ "$timeout" -le 0 ]; then
+              echo "Server failed to start within timeout"
+              exit 1
+            fi
+            sleep 2
+          done
+
+          curl -X POST --data-raw 'username=test_user' http://localhost:7001/register | grep -Po '<code class="ah-api-key">\K[^<]*(?=</code>)' > tests/apikey.txt
+          export AI_HORDE_DEV_APIKEY=$(cat tests/apikey.txt)
+
+          pytest tests/ -s
+
+  runner-horde-sdk-job:
+    runs-on: ubuntu-latest
+    needs: resolve-and-validate-pr
+    if: ${{ inputs.run_horde_sdk_tests }}
+    env:
+      POSTGRES_URL: "localhost:5432/postgres"
+      PGUSER: "postgres"
+      PGPASSWORD: "postgres"
+      REDIS_IP: "localhost"
+      REDIS_SERVERS: '["localhost"]'
+      USE_SQLITE: 0
+      ADMINS: '["test_user#1"]'
+      R2_TRANSIENT_ACCOUNT: ${{ secrets.R2_TRANSIENT_ACCOUNT }}
+      R2_PERMANENT_ACCOUNT: ${{ secrets.R2_PERMANENT_ACCOUNT }}
+      SHARED_AWS_ACCESS_ID: ${{ secrets.SHARED_AWS_ACCESS_ID }}
+      SHARED_AWS_ACCESS_KEY: ${{ secrets.SHARED_AWS_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      KUDOS_TRUST_THRESHOLD: 100
+      AI_HORDE_DEV_URL: "http://localhost:7001/api/"
+
+    services:
+      redis:
+        image: redis
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+      ai-horde-postgres:
+        image: ghcr.io/haidra-org/ai-horde-postgres:latest
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.resolve-and-validate-pr.outputs.merge_ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start AI-Horde server in isolated venv
+        run: |
+          python -m venv .venv-server
+          source .venv-server/bin/activate
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements.txt -r requirements.dev.txt
+          python server.py -vvvvi --horde stable &
+          deactivate
+
+          timeout=120
+          while ! curl -sf http://localhost:7001/api/v2/status/heartbeat > /dev/null 2>&1; do
+            timeout=$((timeout - 2))
+            if [ "$timeout" -le 0 ]; then
+              echo "Server failed to start within timeout"
+              exit 1
+            fi
+            sleep 2
+          done
+
+          curl -X POST --data-raw 'username=test_user' http://localhost:7001/register | grep -Po '<code class="ah-api-key">\K[^<]*(?=</code>)' > tests/apikey.txt
+
+      - name: Run horde_sdk tests in isolated venv
+        run: |
+          python -m venv .venv-sdk
+          source .venv-sdk/bin/activate
+          python -m pip install --upgrade pip wheel setuptools
+
+          export AI_HORDE_DEV_APIKEY=$(cat tests/apikey.txt)
+
+          python -m pip download --no-deps --no-binary :all: horde_sdk
+          tar -xvf horde_sdk-*.tar.gz
+          cd horde_sdk**/
+          python -m pip install .
+          python -m pip install --group dev
+          python -m pytest tests/ --ignore-glob=*api_calls.py --ignore-glob=*test_model_meta.py -s

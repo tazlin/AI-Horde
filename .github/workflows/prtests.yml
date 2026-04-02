@@ -5,12 +5,15 @@
 name: AI-Horde PR tests
 
 on:
-    pull_request_target:
+    pull_request:
       branches:
         - main
       types:
         - opened
         - synchronize
+        - reopened
+        - labeled
+        - unlabeled
       paths:
         - '**.py'
         - '**.json'
@@ -27,19 +30,20 @@ on:
 jobs:
   required-label-job:
     runs-on: ubuntu-latest
-    permissions:
-        issues: write
-        pull-requests: write
     steps:
-        - uses: mheap/github-action-required-labels@v5
-          with:
-            mode: exactly
-            count: 1
-            labels: "allow-ci"
+      - name: Validate allow-ci label
+        run: |
+          labels='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          echo "PR labels: $labels"
+          if [[ "$labels" != *'"allow-ci"'* ]]; then
+            echo "Missing required label: allow-ci"
+            exit 1
+          fi
 
   runner-job:
     runs-on: ubuntu-latest
     needs: required-label-job
+    if: github.event.pull_request.head.repo.full_name == github.repository
     env: &horde-env
       POSTGRES_URL: "localhost:5432/postgres"
       PGUSER: "postgres"
@@ -85,8 +89,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -114,13 +116,12 @@ jobs:
   runner-horde-sdk-job:
     runs-on: ubuntu-latest
     needs: required-label-job
+    if: github.event.pull_request.head.repo.full_name == github.repository
     env: *horde-env
     services: *horde-services
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -162,13 +163,22 @@ jobs:
           python -m pytest tests/ --ignore-glob=*api_calls.py --ignore-glob=*test_model_meta.py -s
 
 
+  fork-pr-integration-note:
+    runs-on: ubuntu-latest
+    needs: required-label-job
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Explain trusted integration path for fork PRs
+        run: |
+          echo "Fork PR detected — integration tests with secrets are not auto-run."
+          echo "Maintainers: run 'AI-Horde trusted fork integration' workflow manually"
+          echo "with pr_number=${{ github.event.pull_request.number }} after reviewing code."
+
   lint-check-job:
     runs-on: ubuntu-latest
     needs: required-label-job
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
