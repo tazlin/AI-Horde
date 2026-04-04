@@ -37,3 +37,4 @@ markdownify
 stripe
 environs
 setuptools<82
+logfire[flask,sqlalchemy,redis]==4.29.0

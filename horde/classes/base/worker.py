@@ -5,6 +5,7 @@
 import json
 from datetime import datetime, timedelta
 
+import logfire
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -334,8 +335,12 @@ class WorkerTemplate(db.Model):
         """To override in case we want to adjust the worker reward based on their bridge version"""
         return 1
 
-    @logger.catch(reraise=True)
     def record_contribution(self, raw_things, kudos, things_per_sec):
+        with logfire.span("horde.worker.record_contribution", worker_id=str(self.id), kudos=kudos):
+            self._record_contribution(raw_things, kudos, things_per_sec)
+
+    @logger.catch(reraise=True)
+    def _record_contribution(self, raw_things, kudos, things_per_sec):
         """We record the servers newest contribution
         We do not need to know what type the contribution is, to avoid unnecessarily extending this method
         """

@@ -5,6 +5,7 @@
 import random
 from datetime import datetime
 
+import logfire
 import requests
 from sqlalchemy import JSON
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -209,23 +210,24 @@ class ProcessingGeneration(db.Model):
     def send_webhook(self, kudos):
         if not self.wp.webhook:
             return
-        data = self.get_details()
-        data["request"] = str(self.wp.id)
-        data["id"] = str(self.id)
-        data["kudos"] = kudos
-        data["worker_id"] = str(data["worker_id"])
-        for riter in range(3):
-            try:
-                req = requests.post(self.wp.webhook, json=data, timeout=3)
-                if not req.ok:
-                    logger.debug(
-                        f"Something went wrong when sending generation webhook: {req.status_code} - {req.text}. "
-                        f"Will retry {3-riter-1} more times...",
-                    )
-                    continue
-                break
-            except Exception as err:
-                logger.debug(f"Exception when sending generation webhook: {err}. Will retry {3-riter-1} more times...")
+        with logfire.span("horde.webhook.send", wp_id=str(self.wp.id), procgen_id=str(self.id)):
+            data = self.get_details()
+            data["request"] = str(self.wp.id)
+            data["id"] = str(self.id)
+            data["kudos"] = kudos
+            data["worker_id"] = str(data["worker_id"])
+            for riter in range(3):
+                try:
+                    req = requests.post(self.wp.webhook, json=data, timeout=3)
+                    if not req.ok:
+                        logger.debug(
+                            f"Something went wrong when sending generation webhook: {req.status_code} - {req.text}. "
+                            f"Will retry {3-riter-1} more times...",
+                        )
+                        continue
+                    break
+                except Exception as err:
+                    logger.debug(f"Exception when sending generation webhook: {err}. Will retry {3-riter-1} more times...")
 
     def set_job_ttl(self):
         """Returns how many seconds each job request should stay waiting before considering it stale and cancelling it

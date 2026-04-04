@@ -9,6 +9,7 @@ import urllib.parse
 import uuid
 from datetime import datetime, timedelta
 
+import logfire
 from sqlalchemy import Boolean, and_, case, func, not_, or_
 from sqlalchemy.orm import contains_eager, noload, selectinload
 
@@ -37,6 +38,7 @@ from horde.flask import SQLITE_MODE, db
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
 from horde.model_reference import model_reference
+from horde.telemetry import _pop_query_duration
 from horde.utils import hash_api_key, validate_regex
 
 ALLOW_ANONYMOUS = True
@@ -275,25 +277,29 @@ def worker_exists(worker_id):
 
 
 def workers_exist(worker_ids):
-    """Check multiple worker IDs in a single query. Returns set of IDs that do NOT exist."""
-    uuid_values = []
+    """Given a list of worker_id strings, return the set of IDs that do NOT exist."""
+    valid_uuids = {}
     invalid_ids = set()
     for wid in worker_ids:
         try:
-            uuid_values.append(uuid.UUID(wid))
+            valid_uuids[wid] = uuid.UUID(wid)
         except ValueError:
             invalid_ids.add(wid)
-    if invalid_ids:
+    if not valid_uuids:
         return invalid_ids
+    uuid_values = list(valid_uuids.values())
     if SQLITE_MODE:
         uuid_values = [str(u) for u in uuid_values]
-    found = set()
-    for worker_class in [ImageWorker, TextWorker, InterrogationWorker]:
-        rows = db.session.query(worker_class.id).filter(worker_class.id.in_(uuid_values)).all()
-        found.update(str(r[0]) for r in rows)
-        if len(found) == len(worker_ids):
-            break
-    return {wid for wid in worker_ids if wid not in found and str(uuid.UUID(wid)) not in found}
+    # Single query across all worker types using the polymorphic base
+    from horde.classes.base.worker import Worker
+
+    found_ids = {row[0] for row in db.session.query(Worker.id).filter(Worker.id.in_(uuid_values)).all()}
+    if SQLITE_MODE:
+        found_id_strs = {str(fid) for fid in found_ids}
+        missing = {wid for wid, uid in valid_uuids.items() if str(uid) not in found_id_strs}
+    else:
+        missing = {wid for wid, uid in valid_uuids.items() if uid not in found_ids}
+    return missing | invalid_ids
 
 
 def get_available_models(filter_model_name: str = None):
@@ -542,8 +548,11 @@ def convert_things_to_kudos(things, **kwargs):
     kudos = round(things, 2)
     return kudos
 
-
 def count_waiting_requests(user, models=None, request_type="image"):
+    with logfire.span("horde.db.count_waiting_requests", request_type=request_type, model_count=len(models) if models else 0):
+        return _count_waiting_requests(user, models, request_type)
+
+def _count_waiting_requests(user, models=None, request_type="image"):
     wp_class = ImageWaitingPrompt
     if request_type == "text":
         wp_class = TextWaitingPrompt
@@ -814,6 +823,9 @@ def count_things_for_specific_model(wp_class, procgen_class, model_name):
 
 @logger.catch(reraise=True)
 def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, priority_user_ids=None, page=0):
+    import time as _time
+
+    t0 = _time.monotonic()
     # This is just the top 3 - Adjusted method to send ImageWorker object. Filters to add.
     # TODO: Filter by ImageWorker not in WP.tricked_worker
     # TODO: If any word in the prompt is in the WP.blacklist rows, then exclude it (L293 in base.worker.ImageWorker.gan_generate())
@@ -969,7 +981,15 @@ def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, p
         .offset(PER_PAGE * page)
         .limit(PER_PAGE)
     )
-    return final_wp_list.populate_existing().with_for_update(skip_locked=True, of=ImageWaitingPrompt).all()
+    with logfire.span(
+        "horde.db.get_sorted_wp",
+        worker_id=str(worker.id),
+        page=page,
+        has_priority=priority_user_ids is not None,
+    ):
+        results = final_wp_list.populate_existing().with_for_update(skip_locked=True, of=ImageWaitingPrompt).all()
+    _pop_query_duration.record(_time.monotonic() - t0, {"horde.page": page})
+    return results
 
 
 def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_user_ids=None):
@@ -1281,9 +1301,6 @@ def get_sorted_forms_filtered_to_worker(worker, forms_list=None, priority_user_i
 # Returns the queue position of the provided WP based on kudos
 # Also returns the amount of things until the wp is generated
 # Also returns the amount of different gens queued
-# Returns the queue position of the provided WP based on kudos
-# Also returns the amount of things until the wp is generated
-# Also returns the amount of different gens queued
 # In-process cache for pre-computed queue positions (refreshed at most once per second)
 _wp_queue_positions_cache = {"image": {}, "text": {}}
 _wp_queue_positions_time = {"image": 0.0, "text": 0.0}
@@ -1312,23 +1329,24 @@ def get_wp_queue_stats(wp):
     if positions:
         return (-1, 0, 0)
     # Fall back to legacy computation if pre-computed positions unavailable
-    things_ahead_in_queue = 0
-    n_ahead_in_queue = 0
-    priority_sorted_list = retrieve_prioritized_wp_queue(wp.wp_type)
-    if priority_sorted_list is None:
-        logger.warning(
-            "Cached WP priority query does not exist. Falling back to direct DB query. Please check thread on primary!",
-        )
-        priority_sorted_list = query_prioritized_wps(wp.wp_type)
-    for riter in range(len(priority_sorted_list)):
-        iter_wp = priority_sorted_list[riter]
-        queued_things = round(iter_wp.things * iter_wp.n / hv.thing_divisors["image"], 2)
-        things_ahead_in_queue += queued_things
-        n_ahead_in_queue += iter_wp.n
-        if iter_wp.id == wp.id:
-            things_ahead_in_queue = round(things_ahead_in_queue, 2)
-            return (riter, things_ahead_in_queue, n_ahead_in_queue)
-    return (-1, 0, 0)
+    with logfire.span("horde.db.get_wp_queue_stats", wp_id=str(wp.id), wp_type=wp.wp_type):
+        things_ahead_in_queue = 0
+        n_ahead_in_queue = 0
+        priority_sorted_list = retrieve_prioritized_wp_queue(wp.wp_type)
+        if priority_sorted_list is None:
+            logger.warning(
+                "Cached WP priority query does not exist. Falling back to direct DB query. Please check thread on primary!",
+            )
+            priority_sorted_list = query_prioritized_wps(wp.wp_type)
+        for riter in range(len(priority_sorted_list)):
+            iter_wp = priority_sorted_list[riter]
+            queued_things = round(iter_wp.things * iter_wp.n / hv.thing_divisors["image"], 2)
+            things_ahead_in_queue += queued_things
+            n_ahead_in_queue += iter_wp.n
+            if iter_wp.id == wp.id:
+                things_ahead_in_queue = round(things_ahead_in_queue, 2)
+                return (riter, things_ahead_in_queue, n_ahead_in_queue)
+        return (-1, 0, 0)
 
 
 def get_wp_by_id(wp_id, lite=False):
@@ -1446,137 +1464,136 @@ def wp_has_valid_workers(wp):
     cached_validity = hr.horde_r_get(f"wp_validity_{wp.id}")
     if cached_validity is not None:
         return bool(int(cached_validity))
-    # tic = time.time()
-    if wp.faulted:
-        return False
-    if wp.expiry < datetime.utcnow():
-        return False
-    worker_class = ImageWorker
-    if wp.wp_type == "text":
-        worker_class = TextWorker
-    elif wp.wp_type == "interrogation":
-        worker_class = InterrogationWorker
-    models_list = wp.get_model_names()
-    worker_ids = wp.get_worker_ids()
-    final_worker_list = (
-        db.session.query(worker_class)
-        .options(
-            noload(worker_class.performance),
-            noload(worker_class.suspicions),
-            noload(worker_class.stats),
-            # Eagerly load relationships accessed by can_generate() to avoid N+1 queries
-            selectinload(worker_class.blacklist),
-            contains_eager(worker_class.user),
+    with logfire.span("horde.db.wp_has_valid_workers", wp_id=str(wp.id), wp_type=wp.wp_type):
+        if wp.faulted:
+            return False
+        if wp.expiry < datetime.utcnow():
+            return False
+        worker_class = ImageWorker
+        if wp.wp_type == "text":
+            worker_class = TextWorker
+        elif wp.wp_type == "interrogation":
+            worker_class = InterrogationWorker
+        models_list = wp.get_model_names()
+        worker_ids = wp.get_worker_ids()
+        final_worker_list = (
+            db.session.query(worker_class)
+            .options(
+                noload(worker_class.performance),
+                noload(worker_class.suspicions),
+                noload(worker_class.stats),
+                # Eagerly load relationships accessed by can_generate() to avoid N+1 queries
+                selectinload(worker_class.blacklist),
+                contains_eager(worker_class.user),
+            )
+            .outerjoin(
+                WorkerModel,
+            )
+            .join(
+                User,
+            )
+            .filter(
+                worker_class.last_check_in > datetime.utcnow() - timedelta(seconds=300),
+                or_(
+                    len(worker_ids) == 0,
+                    and_(
+                        wp.worker_blacklist is False,
+                        worker_class.id.in_(worker_ids),
+                    ),
+                    and_(
+                        wp.worker_blacklist is True,
+                        worker_class.id.not_in(worker_ids),
+                    ),
+                ),
+                or_(
+                    len(models_list) == 0,
+                    WorkerModel.model.in_(models_list),
+                ),
+                or_(
+                    wp.trusted_workers == False,  # noqa E712
+                    and_(
+                        wp.trusted_workers == True,  # noqa E712
+                        User.trusted == True,  # noqa E712
+                    ),
+                ),
+                or_(
+                    wp.safe_ip == True,  # noqa E712
+                    and_(
+                        wp.safe_ip == False,  # noqa E712
+                        worker_class.allow_unsafe_ipaddr == True,  # noqa E712
+                    ),
+                ),
+                or_(
+                    wp.nsfw == False,  # noqa E712
+                    and_(
+                        wp.nsfw == True,  # noqa E712
+                        worker_class.nsfw == True,  # noqa E712
+                    ),
+                ),
+                or_(
+                    worker_class.maintenance == False,  # noqa E712
+                    and_(
+                        worker_class.maintenance == True,  # noqa E712
+                        wp.user_id == worker_class.user_id,
+                    ),
+                ),
+                or_(
+                    worker_class.paused == False,  # noqa E712
+                    and_(
+                        worker_class.paused == True,  # noqa E712
+                        wp.user_id == worker_class.user_id,
+                    ),
+                ),
+            )
         )
-        .outerjoin(
-            WorkerModel,
-        )
-        .join(
-            User,
-        )
-        .filter(
-            worker_class.last_check_in > datetime.utcnow() - timedelta(seconds=300),
-            or_(
-                len(worker_ids) == 0,
-                and_(
-                    wp.worker_blacklist is False,
-                    worker_class.id.in_(worker_ids),
+        if wp.wp_type == "image":
+            final_worker_list = final_worker_list.filter(
+                wp.width * wp.height <= worker_class.max_pixels,
+                or_(
+                    wp.source_image == None,  # noqa E712
+                    and_(
+                        wp.source_image != None,  # noqa E712
+                        worker_class.allow_img2img == True,  # noqa E712
+                    ),
                 ),
-                and_(
-                    wp.worker_blacklist is True,
-                    worker_class.id.not_in(worker_ids),
+                or_(
+                    wp.slow_workers == True,  # noqa E712
+                    worker_class.speed >= 500000,
                 ),
-            ),
-            or_(
-                len(models_list) == 0,
-                WorkerModel.model.in_(models_list),
-            ),
-            or_(
-                wp.trusted_workers == False,  # noqa E712
-                and_(
-                    wp.trusted_workers == True,  # noqa E712
-                    User.trusted == True,  # noqa E712
+                or_(
+                    "loras" not in wp.params,
+                    and_(
+                        worker_class.allow_lora == True,  # noqa E712
+                        # TODO: Create an sql function I can call to check the worker bridge capabilities
+                        "loras" in wp.params,
+                    ),
                 ),
-            ),
-            or_(
-                wp.safe_ip == True,  # noqa E712
-                and_(
-                    wp.safe_ip == False,  # noqa E712
-                    worker_class.allow_unsafe_ipaddr == True,  # noqa E712
+                # or_(
+                #     'tis' not in wp.params,
+                #     and_(
+                #         #TODO: Create an sql function I can call to check the worker bridge capabilities
+                #         'tis' in wp.params,
+                #     ),
+                # ),
+            )
+        elif wp.wp_type == "text":
+            final_worker_list = final_worker_list.filter(
+                wp.max_length <= worker_class.max_length,
+                wp.max_context_length <= worker_class.max_context_length,
+                or_(
+                    wp.slow_workers == True,  # noqa E712
+                    worker_class.speed >= 2,
                 ),
-            ),
-            or_(
-                wp.nsfw == False,  # noqa E712
-                and_(
-                    wp.nsfw == True,  # noqa E712
-                    worker_class.nsfw == True,  # noqa E712
-                ),
-            ),
-            or_(
-                worker_class.maintenance == False,  # noqa E712
-                and_(
-                    worker_class.maintenance == True,  # noqa E712
-                    wp.user_id == worker_class.user_id,
-                ),
-            ),
-            or_(
-                worker_class.paused == False,  # noqa E712
-                and_(
-                    worker_class.paused == True,  # noqa E712
-                    wp.user_id == worker_class.user_id,
-                ),
-            ),
-        )
-    )
-    if wp.wp_type == "image":
-        final_worker_list = final_worker_list.filter(
-            wp.width * wp.height <= worker_class.max_pixels,
-            or_(
-                wp.source_image == None,  # noqa E712
-                and_(
-                    wp.source_image != None,  # noqa E712
-                    worker_class.allow_img2img == True,  # noqa E712
-                ),
-            ),
-            or_(
-                wp.slow_workers == True,  # noqa E712
-                worker_class.speed >= 500000,
-            ),
-            or_(
-                "loras" not in wp.params,
-                and_(
-                    worker_class.allow_lora == True,  # noqa E712
-                    # TODO: Create an sql function I can call to check the worker bridge capabilities
-                    "loras" in wp.params,
-                ),
-            ),
-            # or_(
-            #     'tis' not in wp.params,
-            #     and_(
-            #         #TODO: Create an sql function I can call to check the worker bridge capabilities
-            #         'tis' in wp.params,
-            #     ),
-            # ),
-        )
-    elif wp.wp_type == "text":
-        final_worker_list = final_worker_list.filter(
-            wp.max_length <= worker_class.max_length,
-            wp.max_context_length <= worker_class.max_context_length,
-            or_(
-                wp.slow_workers == True,  # noqa E712
-                worker_class.speed >= 2,
-            ),
-        )
-    elif wp.wp_type == "interrogation":
-        pass  # FIXME: Add interrogation filters
-    worker_found = False
-    for worker in final_worker_list.all():
-        if worker.can_generate(wp)[0]:
-            worker_found = True
-            break
-    # logger.debug(time.time() - tic)
-    hr.horde_r_setex(f"wp_validity_{wp.id}", timedelta(seconds=60), int(worker_found))
-    return worker_found
+            )
+        elif wp.wp_type == "interrogation":
+            pass  # FIXME: Add interrogation filters
+        worker_found = False
+        for worker in final_worker_list.all():
+            if worker.can_generate(wp)[0]:
+                worker_found = True
+                break
+        hr.horde_r_setex(f"wp_validity_{wp.id}", timedelta(seconds=60), int(worker_found))
+        return worker_found
 
 
 @logger.catch(reraise=True)

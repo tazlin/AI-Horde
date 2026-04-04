@@ -10,6 +10,7 @@ import patreon
 import stripe
 from sqlalchemy import func, or_
 
+from horde import vars as hv
 from horde.argparser import args
 from horde.classes.base.user import User
 from horde.classes.kobold.processing_generation import TextProcessingGeneration
@@ -37,7 +38,6 @@ from horde.logger import logger
 from horde.patreon import patrons
 from horde.r2 import delete_source_image
 from horde.stripe_subs import stripe_subs
-from horde import vars as hv
 from horde.vars import horde_instance_id
 
 
@@ -110,9 +110,7 @@ def store_prioritized_wp_queue():
                 # We set the expiry in redis to 10 seconds, in case the primary thread dies
                 # However the primary thread is set to set the cache every 1 second
                 hr.horde_r_setex(f"{wp_type}_wp_cache", timedelta(seconds=5), cached_queue)
-                hr.horde_r_setex(
-                    f"{wp_type}_wp_queue_positions", timedelta(seconds=5), json.dumps(queue_positions)
-                )
+                hr.horde_r_setex(f"{wp_type}_wp_queue_positions", timedelta(seconds=5), json.dumps(queue_positions))
             except (TypeError, OverflowError) as err:
                 logger.error(f"Failed serializing with error: {err}")
 

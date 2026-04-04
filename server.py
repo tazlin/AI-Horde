@@ -19,6 +19,9 @@ from horde.argparser import args
 from horde.flask import HORDE
 from horde.logger import logger
 from horde.metrics import waitress_metrics
+from horde.telemetry import init_telemetry
+
+init_telemetry(HORDE)
 
 if __name__ == "__main__":
     # Only setting this for the WSGI logs

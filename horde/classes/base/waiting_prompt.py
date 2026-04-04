@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import datetime, timedelta
 
+import logfire
 from sqlalchemy import JSON, or_
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.mutable import MutableDict
@@ -110,6 +111,7 @@ class WaitingPrompt(db.Model):
     job_ttl = db.Column(db.Integer, default=150, nullable=False)
     disable_batching = db.Column(db.Boolean, default=False, nullable=False)
     webhook = db.Column(db.String(1024))
+    traceparent = db.Column(db.String(55), nullable=True)
 
     client_agent = db.Column(db.Text, default="unknown:0:unknown", nullable=False)
     sharedkey_id = db.Column(
@@ -139,12 +141,13 @@ class WaitingPrompt(db.Model):
     created = db.Column(db.DateTime(timezone=False), default=datetime.utcnow, index=True)
 
     def __init__(self, worker_ids, models, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        db.session.add(self)
-        db.session.commit()
-        self.set_workers(worker_ids)
-        self.set_models(models)
-        self.extract_params()
+        with logfire.span("horde.wp.init"):
+            super().__init__(*args, **kwargs)
+            db.session.add(self)
+            db.session.commit()
+            self.set_workers(worker_ids)
+            self.set_models(models)
+            self.extract_params()
 
     def set_workers(self, worker_ids=None):
         if not worker_ids:
@@ -166,6 +169,10 @@ class WaitingPrompt(db.Model):
             db.session.add(model_entry)
 
     def activate(self, downgrade_wp_priority=False, extra_source_images=None, kudos_adjustment=0):
+        with logfire.span("horde.wp.activate", wp_id=str(self.id)):
+            self._activate(downgrade_wp_priority, extra_source_images, kudos_adjustment)
+
+    def _activate(self, downgrade_wp_priority=False, extra_source_images=None, kudos_adjustment=0):
         """We separate the activation from __init__ as often we want to check if there's a valid worker for it
         Before we add it to the queue
         """
@@ -221,6 +228,15 @@ class WaitingPrompt(db.Model):
         return self.n > 0
 
     def start_generation(self, worker, amount=1):
+        with logfire.span(
+            "horde.wp.start_generation",
+            wp_id=str(self.id),
+            worker_id=str(worker.id),
+            amount=amount,
+        ) as gen_span:
+            return self._start_generation(worker, amount, gen_span)
+
+    def _start_generation(self, worker, amount=1, gen_span=None):
         # # We have to do this to lock the row for updates, to ensure we don't have racing conditions on who is picking up requests
         # myself_refresh = db.session.query(
         #     type(self)
@@ -260,6 +276,8 @@ class WaitingPrompt(db.Model):
             gens_list.append(new_gen)
             if self.faulted:
                 break
+        if gen_span is not None:
+            gen_span.set_attribute("horde.procgens_created", len(gens_list))
         pop_payload = self.get_pop_payload(gens_list, payload)
         return pop_payload
 
@@ -287,6 +305,8 @@ class WaitingPrompt(db.Model):
             "ids": [g.id for g in procgen_list],
             "ttl": procgen_list[0].job_ttl,
         }
+        if self.traceparent:
+            prompt_payload["traceparent"] = self.traceparent
         if self.extra_source_images and check_bridge_capability("extra_source_images", procgen_list[0].worker.bridge_agent):
             prompt_payload["extra_source_images"] = self.extra_source_images["esi"]
 

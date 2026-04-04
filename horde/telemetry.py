@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2024 Haidra Developers
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+import os
+
+import logfire
+
+from horde.logger import logger
+
+_initialized = False
+
+
+def init_telemetry(app):
+    """Initialize Logfire (OTel) instrumentation and optional Pyroscope profiling.
+
+    Requires OTEL_EXPORTER_OTLP_ENDPOINT env var (e.g. http://127.0.0.1:4318)
+    to route telemetry to the Grafana stack via Alloy.
+    """
+    global _initialized
+    if _initialized:
+        return
+    _initialized = True
+
+    if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
+        logger.init_warn("Telemetry", status="Disabled")
+        return
+
+    # Start Pyroscope profiler first, then wire span processor into Logfire
+    span_processors = _init_pyroscope()
+
+    logfire.configure(
+        send_to_logfire=False,
+        console=False,
+        service_name=os.environ.get("OTEL_SERVICE_NAME", "ai-horde"),
+        additional_span_processors=span_processors or None,
+    )
+
+    logfire.instrument_flask(app)
+    logger.init_ok("Telemetry", status="Flask")
+
+    # SQLAlchemy — must be called after db.engine exists (i.e. within app context)
+    from horde.flask import db
+
+    with app.app_context():
+        logfire.instrument_sqlalchemy(engine=db.engine)
+    logger.init_ok("Telemetry", status="SQLAlchemy")
+
+    # logfire.instrument_redis()
+    # logger.init_ok("Telemetry", status="Redis")
+
+    # Bridge loguru → OTel logs so every log record carries trace_id/span_id
+    loguru_handler = logfire.loguru_handler()
+    if isinstance(loguru_handler, dict):
+        logger.add(**loguru_handler)
+    else:
+        logger.add(loguru_handler)
+    logger.init_ok("Telemetry", status="Loguru")
+
+    logger.init_ok("Telemetry", status="Ready")
+
+
+def _init_pyroscope():
+    """Start Pyroscope continuous profiling and return span processors for trace-profile linking."""
+    if os.environ.get("PYROSCOPE_ENABLED", "").lower() != "true":
+        return []
+
+    try:
+        import pyroscope  # noqa: F811
+
+        pyroscope.configure(
+            application_name=os.environ.get("OTEL_SERVICE_NAME", "ai-horde"),
+            server_address=os.environ.get("PYROSCOPE_SERVER_ADDRESS", "http://localhost:4040"),
+            tags={
+                "environment": os.environ.get("DEPLOYMENT_ENVIRONMENT", "development"),
+            },
+            tenant_id=os.environ.get("PYROSCOPE_TENANT_ID"),
+        )
+        logger.init_ok("Telemetry", status="Pyroscope")
+    except ImportError:
+        logger.init_warn("Telemetry", status="Pyroscope N/A")
+        return []
+    except Exception as err:
+        logger.init_err("Telemetry", status=f"Pyroscope: {err}")
+        return []
+
+    # Link OTel spans → Pyroscope profiles via pyroscope.profile.id attribute
+    try:
+        from pyroscope.otel import PyroscopeSpanProcessor
+
+        logger.init_ok("Telemetry", status="Pyroscope span profiles")
+        return [PyroscopeSpanProcessor()]
+    except ImportError:
+        logger.init_warn("Telemetry", status="pyroscope-otel N/A (pip install pyroscope-otel)")
+        return []
+
+
+def get_traceparent():
+    """Capture the current W3C traceparent string from the active span context."""
+    from opentelemetry import trace
+    from opentelemetry.trace import format_span_id, format_trace_id
+
+    span = trace.get_current_span()
+    ctx = span.get_span_context()
+    if ctx and ctx.trace_id:
+        return f"00-{format_trace_id(ctx.trace_id)}-{format_span_id(ctx.span_id)}-{ctx.trace_flags:02x}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# OTel Metrics — recorded inside active spans so exemplars (trace→metric
+# links) are automatically attached by the SDK when using histogram views.
+# ---------------------------------------------------------------------------
+
+_generate_duration = logfire.metric_histogram(
+    "horde.generate.duration",
+    unit="s",
+    description="End-to-end duration of a generate request",
+)
+
+_pop_duration = logfire.metric_histogram(
+    "horde.pop.duration",
+    unit="s",
+    description="End-to-end duration of a job_pop request",
+)
+
+_pop_query_duration = logfire.metric_histogram(
+    "horde.pop.wp_query.duration",
+    unit="s",
+    description="Duration of get_sorted_wp_filtered_to_worker query",
+)
+
+_pop_candidates = logfire.metric_histogram(
+    "horde.pop.candidates_evaluated",
+    unit="1",
+    description="Number of WaitingPrompts evaluated per pop",
+)
+
+_pop_skipped = logfire.metric_counter(
+    "horde.pop.skipped",
+    unit="1",
+    description="WPs skipped during pop, by reason",
+)
+
+_submit_duration = logfire.metric_histogram(
+    "horde.submit.duration",
+    unit="s",
+    description="End-to-end duration of a job_submit request",
+)
+
+_submit_kudos = logfire.metric_histogram(
+    "horde.submit.kudos",
+    unit="kudos",
+    description="Kudos awarded per job submission",
+)
+
+_ip_check_duration = logfire.metric_histogram(
+    "horde.countermeasures.ip_check.duration",
+    unit="s",
+    description="Duration of is_ip_safe external check",
+)
