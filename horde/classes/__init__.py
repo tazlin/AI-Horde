@@ -35,7 +35,7 @@ def init_db(app):
     with app.app_context():
         db.create_all()
 
-        sql_statement_dir = Path(__file__).parent.parent / "sql_statements"
+        sql_statement_dir = Path(__file__).parent.parent.parent / "sql_statements"
 
         # The order of these directories is important. `cron` creates a stored procedure that is
         # used by queries in all other `cron_jobs/` directories.
