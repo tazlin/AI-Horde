@@ -1165,11 +1165,11 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     ret_dict = {}
     bridge_version_count = 0
 
-    if raw.get("models", 0) > 0:
+    if raw.get("models", 0) or 0 > 0:
         ret_dict["models"] = raw["models"]
-    if raw.get("worker_id", 0) > 0:
+    if raw.get("worker_id", 0) or 0 > 0:
         ret_dict["worker_id"] = raw["worker_id"]
-    if raw.get("max_pixels", 0) > 0:
+    if raw.get("max_pixels", 0) or 0 > 0:
         ret_dict["max_pixels"] = raw["max_pixels"]
 
     # img2img — attribute to setting or bridge depending on which is the cause
@@ -1227,7 +1227,7 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     if perf_count > 0:
         ret_dict["performance"] = perf_count
 
-    if raw.get("untrusted", 0) > 0:
+    if raw.get("untrusted", 0) or 0 > 0:
         ret_dict["untrusted"] = raw["untrusted"]
 
     # bridge_version sampler/capability

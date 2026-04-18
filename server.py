@@ -16,12 +16,42 @@ else:
     load_dotenv()
 
 from horde.argparser import args
-from horde.flask import HORDE
-from horde.logger import logger
+from horde.flask import create_app
+from horde.logger import logger, reconfigure_from_args
 from horde.metrics import waitress_metrics
 from horde.telemetry import init_telemetry
 
-init_telemetry(HORDE)
+reconfigure_from_args(args)
+app = create_app()
+init_telemetry(app)
+
+# CLI modes (moved from horde/__init__.py)
+if args.force_subscription:
+    from horde.ops import force_subscription_kudos
+
+    logger.info(f"forcing kudos on user_id: {args.force_subscription}")
+    force_subscription_kudos(args.force_subscription, args.prevent_date_change)
+    import sys
+
+    sys.exit()
+
+if args.test:
+    from horde.sandbox import test
+
+    test()
+
+if args.check_prompts:
+    import horde.database.threads as threads
+
+    threads.check_waiting_prompts()
+    import sys
+
+    sys.exit()
+
+if args.new_patreons:
+    import sys
+
+    sys.exit()
 
 if __name__ == "__main__":
     # Only setting this for the WSGI logs
@@ -50,7 +80,7 @@ if __name__ == "__main__":
         logger.init_warn("WSGI Mode", status="Insecure")
 
     waitress.serve(
-        HORDE,
+        app,
         host=args.listen,
         port=args.port,
         url_scheme=url_scheme,
@@ -58,5 +88,4 @@ if __name__ == "__main__":
         connection_limit=args.waitress_connection_limit,
         asyncore_use_poll=True,
     )
-    # HORDE.run(debug=True,host="0.0.0.0",port="5001")
     logger.init("WSGI Server", status="Stopped")

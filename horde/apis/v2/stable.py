@@ -36,7 +36,7 @@ from horde.classes.stable.worker import ImageWorker
 from horde.countermeasures import CounterMeasures
 from horde.database import functions as database
 from horde.enums import WarningMessage
-from horde.flask import HORDE, cache, db
+from horde.flask import cache, db, get_app
 from horde.image import calculate_image_tiles, ensure_source_image_uploaded
 from horde.limiter import limiter
 from horde.model_reference import model_reference
@@ -556,7 +556,7 @@ class ImageAsyncCheck(Resource):
             wp_queue_stats=database.get_wp_queue_stats(wp),
             active_worker_count=database.count_active_workers(),
         )
-        logger.debug(lite_status)
+        logger.debug(f"{id}: {lite_status}")
         return (lite_status, 200)
 
 
@@ -934,7 +934,7 @@ class Interrogate(Resource):
             raise e.MaintenanceMode("Interrogate")
         if self.args.webhook and not self.args.webhook.startswith("https://"):
             raise e.BadRequest("webhooks need to point to an https endpoint.")
-        with HORDE.app_context():
+        with get_app().app_context():
             if self.args.apikey:
                 self.user = database.find_user_by_api_key(self.args["apikey"])
             if not self.user:
