@@ -43,7 +43,7 @@ def create_app(config=None):
             app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///horde.db"
         else:
             app.config["SQLALCHEMY_DATABASE_URI"] = (
-                f"postgresql://{os.getenv('POSTGRES_USER', 'postgres')}:" f"{os.getenv('POSTGRES_PASS')}@{os.getenv('POSTGRES_URL')}"
+                f"postgresql://{os.getenv('POSTGRES_USER', 'postgres')}:{os.getenv('POSTGRES_PASS')}@{os.getenv('POSTGRES_URL')}"
             )
             app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
                 "pool_size": 50,
@@ -65,7 +65,7 @@ def create_app(config=None):
                     "CACHE_TYPE": "RedisCache",
                     "CACHE_REDIS_URL": ger_cache_url(),
                     "CACHE_DEFAULT_TIMEOUT": 300,
-                }
+                },
             )
             cache.init_app(app)
             logger.init_ok("Flask Cache", status="Connected")

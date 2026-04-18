@@ -9,7 +9,6 @@ from uuid import uuid4
 
 import boto3
 import logfire
-from botocore.config import Config
 from botocore.exceptions import ClientError
 from PIL import Image
 

@@ -14,7 +14,7 @@ def app():
         config={
             "TESTING": True,
             "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
-        }
+        },
     )
     with app.app_context():
         db.create_all()
