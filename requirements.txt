@@ -38,5 +38,5 @@ stripe
 environs
 setuptools<82
 logfire[flask,sqlalchemy,redis]==4.29.0
-# pyroscope-io # add if you want to use pyroscope for profiling
-# pyroscope-otel
+pyroscope-io # can be removed if you don't want to use pyroscope for profiling
+pyroscope-otel # can be removed if you don't want to use pyroscope for profiling
