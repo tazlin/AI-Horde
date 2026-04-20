@@ -210,24 +210,53 @@ class ProcessingGeneration(db.Model):
     def send_webhook(self, kudos):
         if not self.wp.webhook:
             return
-        with logfire.span("horde.webhook.send", wp_id=str(self.wp.id), procgen_id=str(self.id)):
+        with logfire.span("horde.webhook.send", wp_id=str(self.wp.id), procgen_id=str(self.id)) as span:
+            from horde.telemetry import _webhook_duration, _webhook_outcomes
+
             data = self.get_details()
             data["request"] = str(self.wp.id)
             data["id"] = str(self.id)
             data["kudos"] = kudos
             data["worker_id"] = str(data["worker_id"])
+            outcome = "giveup"
+            attempts = 0
+            import time as _time
+
             for riter in range(3):
+                attempts += 1
+                t0 = _time.monotonic()
+                status_code = None
+                attempt_outcome = "exception"
                 try:
                     req = requests.post(self.wp.webhook, json=data, timeout=3)
+                    status_code = req.status_code
                     if not req.ok:
+                        attempt_outcome = "http_error"
+                        _webhook_duration.record(
+                            _time.monotonic() - t0,
+                            {"attempt": riter, "outcome": attempt_outcome, "status_code": status_code},
+                        )
                         logger.debug(
                             f"Something went wrong when sending generation webhook: {req.status_code} - {req.text}. "
                             f"Will retry {3 - riter - 1} more times...",
                         )
                         continue
+                    attempt_outcome = "ok"
+                    outcome = "ok"
+                    _webhook_duration.record(
+                        _time.monotonic() - t0,
+                        {"attempt": riter, "outcome": attempt_outcome, "status_code": status_code},
+                    )
                     break
                 except Exception as err:
+                    _webhook_duration.record(
+                        _time.monotonic() - t0,
+                        {"attempt": riter, "outcome": attempt_outcome},
+                    )
                     logger.debug(f"Exception when sending generation webhook: {err}. Will retry {3 - riter - 1} more times...")
+            _webhook_outcomes.add(1, {"outcome": outcome})
+            span.set_attribute("horde.webhook.outcome", outcome)
+            span.set_attribute("horde.webhook.attempts", attempts)
 
     def set_job_ttl(self):
         """Returns how many seconds each job request should stay waiting before considering it stale and cancelling it

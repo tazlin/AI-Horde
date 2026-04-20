@@ -46,8 +46,32 @@ def init_telemetry(app):
         logfire.instrument_sqlalchemy(engine=db.engine)
     logger.init_ok("Telemetry", status="SQLAlchemy")
 
-    # logfire.instrument_redis()
-    # logger.init_ok("Telemetry", status="Redis")
+    # Redis instrumentation — disabled by default because each horde_r_* wrapper
+    # issues several commands, which can dominate trace volume. Enable with
+    # OTEL_INSTRUMENT_REDIS=true; Alloy-side span filtering is expected to drop
+    # fast (<2ms) Redis spans while retaining slow cache anomalies.
+    if os.environ.get("OTEL_INSTRUMENT_REDIS", "").lower() == "true":
+        try:
+            logfire.instrument_redis()
+            logger.init_ok("Telemetry", status="Redis")
+        except Exception as err:
+            logger.init_warn("Telemetry", status=f"Redis: {err}")
+
+    # Outbound HTTP (webhooks etc.) — inject W3C traceparent so downstream
+    # services can correlate with Horde traces and emit child spans for each
+    # request, including retries.
+    try:
+        from opentelemetry.instrumentation.requests import RequestsInstrumentor
+
+        RequestsInstrumentor().instrument()
+        logger.init_ok("Telemetry", status="Requests")
+    except ImportError:
+        logger.init_warn(
+            "Telemetry",
+            status="Requests N/A (pip install opentelemetry-instrumentation-requests)",
+        )
+    except Exception as err:
+        logger.init_warn("Telemetry", status=f"Requests: {err}")
 
     # Bridge loguru → OTel logs so every log record carries trace_id/span_id
     loguru_handler = logfire.loguru_handler()
@@ -159,3 +183,50 @@ _ip_check_duration = logfire.metric_histogram(
     unit="s",
     description="Duration of is_ip_safe external check",
 )
+
+# Background timed jobs (PrimaryTimedFunction) — observability for queue pruning,
+# stats, filter regex rebuilds, monthly kudos, etc.
+_job_duration = logfire.metric_histogram(
+    "horde.job.duration",
+    unit="s",
+    description="Duration of a PrimaryTimedFunction invocation",
+)
+
+_job_failures = logfire.metric_counter(
+    "horde.job.failures",
+    unit="1",
+    description="PrimaryTimedFunction invocations that raised",
+)
+
+# Outbound webhooks — record per-attempt latency and terminal outcomes so
+# webhook reliability can be dashboarded and alerted on independently of
+# the (already-instrumented) surrounding span.
+_webhook_duration = logfire.metric_histogram(
+    "horde.webhook.attempt.duration",
+    unit="s",
+    description="Duration of a single webhook POST attempt",
+)
+
+_webhook_outcomes = logfire.metric_counter(
+    "horde.webhook.outcomes",
+    unit="1",
+    description="Terminal webhook outcomes, by reason (ok|http_error|exception|giveup)",
+)
+
+
+# ---------------------------------------------------------------------------
+# Pyroscope low-cardinality tagging helper
+# ---------------------------------------------------------------------------
+
+def pyroscope_tag(**tags):
+    """Context manager that applies low-cardinality Pyroscope tags (no-op if
+    Pyroscope is unavailable).  Callers must only pass bounded tag keys/values
+    (endpoint family, job type, etc.) — never raw user/worker IDs.
+    """
+    try:
+        import pyroscope  # type: ignore
+    except ImportError:
+        from contextlib import nullcontext
+
+        return nullcontext()
+    return pyroscope.tag_wrapper(tags)

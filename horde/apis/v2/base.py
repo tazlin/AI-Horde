@@ -50,6 +50,7 @@ from horde.telemetry import (
     _pop_skipped,
     _submit_duration,
     _submit_kudos,
+    pyroscope_tag,
 )
 from horde.utils import datetime_parser, hash_api_key, hash_dictionary, is_profane, sanitize_string
 from horde.vars import horde_contact_email, horde_title, horde_url
@@ -130,7 +131,7 @@ class GenerateTemplate(Resource):
 
     def post(self):
         t0 = time.monotonic()
-        with logfire.span(
+        with pyroscope_tag(endpoint="generate", gentype=self.gentype), logfire.span(
             "horde.generate",
             gentype=self.gentype,
             dry_run=getattr(self.args, "dry_run", False),
@@ -484,7 +485,7 @@ class JobPopTemplate(Resource):
 
     def post(self):
         t0 = time.monotonic()
-        with logfire.span("horde.job_pop"):
+        with pyroscope_tag(endpoint="job_pop"), logfire.span("horde.job_pop"):
             result = self._post_inner()
             _pop_duration.record(time.monotonic() - t0)
             return result
@@ -687,7 +688,7 @@ class JobPopTemplate(Resource):
 class JobSubmitTemplate(Resource):
     def post(self):
         t0 = time.monotonic()
-        with logfire.span("horde.job_submit"):
+        with pyroscope_tag(endpoint="job_submit"), logfire.span("horde.job_submit"):
             self.validate()
             _submit_duration.record(time.monotonic() - t0)
             _submit_kudos.record(self.kudos)
