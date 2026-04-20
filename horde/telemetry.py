@@ -39,6 +39,11 @@ def init_telemetry(app):
     logfire.instrument_flask(app)
     logger.init_ok("Telemetry", status="Flask")
 
+    # Rebind metric instruments against the post-configure meter so they
+    # actually export. See the comment near `_meter` below.
+    _bind_instruments()
+    logger.init_ok("Telemetry", status="Metrics")
+
     # SQLAlchemy — must be called after db.engine exists (i.e. within app context)
     from horde.flask import db
 
@@ -135,95 +140,76 @@ def get_traceparent():
 # OTel Metrics — recorded inside active spans so exemplars (trace→metric
 # links) are automatically attached by the SDK when using histogram views.
 #
-# We acquire instruments from the OTel global meter API (not logfire.metric_*)
-# because the OTel global uses a ProxyMeterProvider that correctly rewires
-# instruments to the real exporter after `logfire.configure()` runs. Using
-# `logfire.metric_histogram(...)` at module import time (before configure)
-# binds to logfire's pre-configure state and the subsequent reconfiguration
-# does not retroactively hook those instruments to the OTLP exporter, which
-# caused our custom `horde.*` histograms to silently not export.
+# Instruments must be acquired AFTER `logfire.configure()` has installed the
+# real MeterProvider, otherwise they bind to logfire's pre-configure proxy
+# state and never export (observed: `logfire.metric_histogram(...)` or even
+# `opentelemetry.metrics.get_meter(...).create_histogram(...)` called at
+# module import time silently no-op because logfire's ProxyMeterProvider
+# does not retroactively wire early instruments into its reader pipeline
+# the same way it wires instruments created post-configure).
+#
+# We keep module-level names so existing call sites (`_generate_duration
+# .record(...)`, etc.) keep working — they start as OTel NoOp instruments
+# and are swapped to real ones by `_bind_instruments()` from init_telemetry.
 # ---------------------------------------------------------------------------
 
 from opentelemetry import metrics as _otel_metrics
+from opentelemetry.metrics import NoOpMeter as _NoOpMeter
 
-_meter = _otel_metrics.get_meter("ai-horde")
 
-_generate_duration = _meter.create_histogram(
-    "horde.generate.duration",
-    unit="s",
-    description="End-to-end duration of a generate request",
+class _InstrumentProxy:
+    """Thin forwarder so callers that imported a module-level instrument
+    name (via ``from horde.telemetry import _generate_duration``) keep
+    working after ``_bind_instruments()`` swaps the underlying real
+    instrument in post-configure."""
+
+    __slots__ = ("_real",)
+
+    def __init__(self, real):
+        self._real = real
+
+    def record(self, *args, **kwargs):  # histogram API
+        return self._real.record(*args, **kwargs)
+
+    def add(self, *args, **kwargs):  # counter API
+        return self._real.add(*args, **kwargs)
+
+
+_HISTOGRAM_SPECS = (
+    ("_generate_duration", "horde.generate.duration", "s", "End-to-end duration of a generate request"),
+    ("_pop_duration", "horde.pop.duration", "s", "End-to-end duration of a job_pop request"),
+    ("_pop_query_duration", "horde.pop.wp_query.duration", "s", "Duration of get_sorted_wp_filtered_to_worker query"),
+    ("_pop_candidates", "horde.pop.candidates_evaluated", "1", "Number of WaitingPrompts evaluated per pop"),
+    ("_submit_duration", "horde.submit.duration", "s", "End-to-end duration of a job_submit request"),
+    ("_submit_kudos", "horde.submit.kudos", "kudos", "Kudos awarded per job submission"),
+    ("_ip_check_duration", "horde.countermeasures.ip_check.duration", "s", "Duration of is_ip_safe external check"),
+    ("_job_duration", "horde.job.duration", "s", "Duration of a PrimaryTimedFunction invocation"),
+    ("_webhook_duration", "horde.webhook.attempt.duration", "s", "Duration of a single webhook POST attempt"),
 )
 
-_pop_duration = _meter.create_histogram(
-    "horde.pop.duration",
-    unit="s",
-    description="End-to-end duration of a job_pop request",
+_COUNTER_SPECS = (
+    ("_pop_skipped", "horde.pop.skipped", "1", "WPs skipped during pop, by reason"),
+    ("_job_failures", "horde.job.failures", "1", "PrimaryTimedFunction invocations that raised"),
+    ("_webhook_outcomes", "horde.webhook.outcomes", "1", "Terminal webhook outcomes, by reason (ok|http_error|exception|giveup)"),
 )
 
-_pop_query_duration = _meter.create_histogram(
-    "horde.pop.wp_query.duration",
-    unit="s",
-    description="Duration of get_sorted_wp_filtered_to_worker query",
-)
+# NoOp-backed proxies — populated with real instruments by _bind_instruments().
+_noop_meter = _NoOpMeter("ai-horde")
+for _name, _otel_name, _unit, _desc in _HISTOGRAM_SPECS:
+    globals()[_name] = _InstrumentProxy(_noop_meter.create_histogram(_otel_name, unit=_unit, description=_desc))
+for _name, _otel_name, _unit, _desc in _COUNTER_SPECS:
+    globals()[_name] = _InstrumentProxy(_noop_meter.create_counter(_otel_name, unit=_unit, description=_desc))
 
-_pop_candidates = _meter.create_histogram(
-    "horde.pop.candidates_evaluated",
-    unit="1",
-    description="Number of WaitingPrompts evaluated per pop",
-)
 
-_pop_skipped = _meter.create_counter(
-    "horde.pop.skipped",
-    unit="1",
-    description="WPs skipped during pop, by reason",
-)
-
-_submit_duration = _meter.create_histogram(
-    "horde.submit.duration",
-    unit="s",
-    description="End-to-end duration of a job_submit request",
-)
-
-_submit_kudos = _meter.create_histogram(
-    "horde.submit.kudos",
-    unit="kudos",
-    description="Kudos awarded per job submission",
-)
-
-_ip_check_duration = _meter.create_histogram(
-    "horde.countermeasures.ip_check.duration",
-    unit="s",
-    description="Duration of is_ip_safe external check",
-)
-
-# Background timed jobs (PrimaryTimedFunction) — observability for queue pruning,
-# stats, filter regex rebuilds, monthly kudos, etc.
-_job_duration = _meter.create_histogram(
-    "horde.job.duration",
-    unit="s",
-    description="Duration of a PrimaryTimedFunction invocation",
-)
-
-_job_failures = _meter.create_counter(
-    "horde.job.failures",
-    unit="1",
-    description="PrimaryTimedFunction invocations that raised",
-)
-
-# Outbound webhooks — record per-attempt latency and terminal outcomes so
-# webhook reliability can be dashboarded and alerted on independently of
-# the (already-instrumented) surrounding span.
-_webhook_duration = _meter.create_histogram(
-    "horde.webhook.attempt.duration",
-    unit="s",
-    description="Duration of a single webhook POST attempt",
-)
-
-_webhook_outcomes = _meter.create_counter(
-    "horde.webhook.outcomes",
-    unit="1",
-    description="Terminal webhook outcomes, by reason (ok|http_error|exception|giveup)",
-)
+def _bind_instruments():
+    """Swap the NoOp instrument proxies with real ones from the post-configure
+    meter. Must be called after ``logfire.configure()``.
+    """
+    meter = _otel_metrics.get_meter("ai-horde")
+    for name, otel_name, unit, desc in _HISTOGRAM_SPECS:
+        globals()[name]._real = meter.create_histogram(otel_name, unit=unit, description=desc)
+    for name, otel_name, unit, desc in _COUNTER_SPECS:
+        globals()[name]._real = meter.create_counter(otel_name, unit=unit, description=desc)
 
 
 # ---------------------------------------------------------------------------
