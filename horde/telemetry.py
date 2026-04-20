@@ -134,51 +134,63 @@ def get_traceparent():
 # ---------------------------------------------------------------------------
 # OTel Metrics — recorded inside active spans so exemplars (trace→metric
 # links) are automatically attached by the SDK when using histogram views.
+#
+# We acquire instruments from the OTel global meter API (not logfire.metric_*)
+# because the OTel global uses a ProxyMeterProvider that correctly rewires
+# instruments to the real exporter after `logfire.configure()` runs. Using
+# `logfire.metric_histogram(...)` at module import time (before configure)
+# binds to logfire's pre-configure state and the subsequent reconfiguration
+# does not retroactively hook those instruments to the OTLP exporter, which
+# caused our custom `horde.*` histograms to silently not export.
 # ---------------------------------------------------------------------------
 
-_generate_duration = logfire.metric_histogram(
+from opentelemetry import metrics as _otel_metrics
+
+_meter = _otel_metrics.get_meter("ai-horde")
+
+_generate_duration = _meter.create_histogram(
     "horde.generate.duration",
     unit="s",
     description="End-to-end duration of a generate request",
 )
 
-_pop_duration = logfire.metric_histogram(
+_pop_duration = _meter.create_histogram(
     "horde.pop.duration",
     unit="s",
     description="End-to-end duration of a job_pop request",
 )
 
-_pop_query_duration = logfire.metric_histogram(
+_pop_query_duration = _meter.create_histogram(
     "horde.pop.wp_query.duration",
     unit="s",
     description="Duration of get_sorted_wp_filtered_to_worker query",
 )
 
-_pop_candidates = logfire.metric_histogram(
+_pop_candidates = _meter.create_histogram(
     "horde.pop.candidates_evaluated",
     unit="1",
     description="Number of WaitingPrompts evaluated per pop",
 )
 
-_pop_skipped = logfire.metric_counter(
+_pop_skipped = _meter.create_counter(
     "horde.pop.skipped",
     unit="1",
     description="WPs skipped during pop, by reason",
 )
 
-_submit_duration = logfire.metric_histogram(
+_submit_duration = _meter.create_histogram(
     "horde.submit.duration",
     unit="s",
     description="End-to-end duration of a job_submit request",
 )
 
-_submit_kudos = logfire.metric_histogram(
+_submit_kudos = _meter.create_histogram(
     "horde.submit.kudos",
     unit="kudos",
     description="Kudos awarded per job submission",
 )
 
-_ip_check_duration = logfire.metric_histogram(
+_ip_check_duration = _meter.create_histogram(
     "horde.countermeasures.ip_check.duration",
     unit="s",
     description="Duration of is_ip_safe external check",
@@ -186,13 +198,13 @@ _ip_check_duration = logfire.metric_histogram(
 
 # Background timed jobs (PrimaryTimedFunction) — observability for queue pruning,
 # stats, filter regex rebuilds, monthly kudos, etc.
-_job_duration = logfire.metric_histogram(
+_job_duration = _meter.create_histogram(
     "horde.job.duration",
     unit="s",
     description="Duration of a PrimaryTimedFunction invocation",
 )
 
-_job_failures = logfire.metric_counter(
+_job_failures = _meter.create_counter(
     "horde.job.failures",
     unit="1",
     description="PrimaryTimedFunction invocations that raised",
@@ -201,13 +213,13 @@ _job_failures = logfire.metric_counter(
 # Outbound webhooks — record per-attempt latency and terminal outcomes so
 # webhook reliability can be dashboarded and alerted on independently of
 # the (already-instrumented) surrounding span.
-_webhook_duration = logfire.metric_histogram(
+_webhook_duration = _meter.create_histogram(
     "horde.webhook.attempt.duration",
     unit="s",
     description="Duration of a single webhook POST attempt",
 )
 
-_webhook_outcomes = logfire.metric_counter(
+_webhook_outcomes = _meter.create_counter(
     "horde.webhook.outcomes",
     unit="1",
     description="Terminal webhook outcomes, by reason (ok|http_error|exception|giveup)",
