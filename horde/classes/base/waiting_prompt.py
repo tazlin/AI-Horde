@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import json
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -20,6 +21,12 @@ from horde.classes.stable.processing_generation import ImageProcessingGeneration
 from horde.flask import SQLITE_MODE, db
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
+from horde.metrics import (
+    wp_activate_base_commit_duration,
+    wp_activate_base_record_usage_duration,
+    wp_activate_duration,
+    wp_activation_age,
+)
 from horde.utils import get_db_uuid, get_expiry_date, get_extra_slow_expiry_date
 
 procgen_classes = {
@@ -170,22 +177,37 @@ class WaitingPrompt(db.Model):
 
     def activate(self, downgrade_wp_priority=False, extra_source_images=None, kudos_adjustment=0):
         with logfire.span("horde.wp.activate", wp_id=str(self.id)):
-            self._activate(downgrade_wp_priority, extra_source_images, kudos_adjustment)
+            t0 = time.monotonic()
+            try:
+                self._activate(downgrade_wp_priority, extra_source_images, kudos_adjustment)
+            finally:
+                wp_type = getattr(self, "wp_type", "unknown")
+                wp_activate_duration.record(
+                    time.monotonic() - t0, {"horde.wp_type": wp_type}
+                )
+                # Elapsed seconds between WP row insert and activation.
+                # This surfaces "time spent validating/initiating" before the
+                # WP becomes visible to workers — a key SLO signal.
+                if getattr(self, "created", None):
+                    age = (datetime.utcnow() - self.created).total_seconds()
+                    if age >= 0:
+                        wp_activation_age.record(age, {"horde.wp_type": wp_type})
 
     def _activate(self, downgrade_wp_priority=False, extra_source_images=None, kudos_adjustment=0):
         """We separate the activation from __init__ as often we want to check if there's a valid worker for it
         Before we add it to the queue
         """
         self.active = True
-        if self.user.flagged and self.user.kudos > 10:
-            self.extra_priority = round(self.user.kudos / 1000)
-        elif self.user.flagged:
-            self.extra_priority = -100
-        elif downgrade_wp_priority:
-            logger.debug("Started WP with downgraded priority to Anon")
-            self.extra_priority = -50
-        else:
-            self.extra_priority = self.user.kudos
+        with logfire.span("horde.wp.activate.priority_calc"):
+            if self.user.flagged and self.user.kudos > 10:
+                self.extra_priority = round(self.user.kudos / 1000)
+            elif self.user.flagged:
+                self.extra_priority = -100
+            elif downgrade_wp_priority:
+                logger.debug("Started WP with downgraded priority to Anon")
+                self.extra_priority = -50
+            else:
+                self.extra_priority = self.user.kudos
         # This is an extra cost for the operation as a whole, to represent the infrastructure costs
         # and rewarding requests which bundle multiple jobs into the same payload
         # Instead of splitting them into multiples.
@@ -195,9 +217,19 @@ class WaitingPrompt(db.Model):
             # Extra source images add more infrastructure costs, which are represented with a kudos tax
             horde_tax += 5 * len(extra_source_images)
         horde_tax += kudos_adjustment
-        self.record_usage(raw_things=0, kudos=horde_tax, usage_type=self.wp_type, avoid_burn=True)
+        with logfire.span("horde.wp.activate.record_usage", horde_tax=horde_tax):
+            _t_ru = time.monotonic()
+            try:
+                self.record_usage(raw_things=0, kudos=horde_tax, usage_type=self.wp_type, avoid_burn=True)
+            finally:
+                wp_activate_base_record_usage_duration.record(time.monotonic() - _t_ru, {})
         # logger.debug(f"wp {self.id} initiated and paying horde tax: {horde_tax}")
-        db.session.commit()
+        with logfire.span("horde.wp.activate.commit"):
+            _t_c = time.monotonic()
+            try:
+                db.session.commit()
+            finally:
+                wp_activate_base_commit_duration.record(time.monotonic() - _t_c, {})
 
     def get_model_names(self):
         return [m.model for m in self.models]
@@ -447,7 +479,7 @@ class WaitingPrompt(db.Model):
         """
         return kudos
 
-    def record_usage(self, raw_things, kudos, usage_type, avoid_burn=False):
+    def record_usage(self, raw_things, kudos, usage_type, avoid_burn=False, commit=True):
         """Record that we received a requested generation and how much kudos it costs us
         We use 'thing' here as we do not care what type of thing we're recording at this point
         This avoids me having to extend this just to change a var name
@@ -455,10 +487,10 @@ class WaitingPrompt(db.Model):
         if not avoid_burn:
             kudos = self.calculate_extra_kudos_burn(kudos)
         if self.sharedkey_id is not None:
-            self.sharedkey.consume_kudos(kudos)
-        self.user.record_usage(raw_things, kudos, usage_type)
+            self.sharedkey.consume_kudos(kudos, commit=False)
+        self.user.record_usage(raw_things, kudos, usage_type, commit=False)
         self.consumed_kudos = round(self.consumed_kudos + kudos, 2)
-        self.refresh()
+        self.refresh(commit=commit)
 
     def extrapolate_dry_run_kudos(self):
         kudos = self.calculate_kudos()
@@ -495,14 +527,15 @@ class WaitingPrompt(db.Model):
         except Exception as err:
             logger.warning(f"Error when aborting WP. Skipping: {err}")
 
-    def refresh(self, worker=None):
+    def refresh(self, worker=None, commit=True):
         if worker is not None and worker.extra_slow_worker is True:
             self.expiry = get_extra_slow_expiry_date()
         else:
             new_expiry = get_expiry_date()
             if self.expiry < new_expiry:
                 self.expiry = new_expiry
-        db.session.commit()
+        if commit:
+            db.session.commit()
 
     def is_stale(self):
         if datetime.utcnow() > self.expiry:

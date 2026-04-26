@@ -13,7 +13,11 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from horde.logger import logger
 from horde.redis_ctrl import ger_cache_url, is_redis_up
 
-db = SQLAlchemy()
+# expire_on_commit=False keeps ORM attributes valid across commits within a
+# single request. SQLAlchemy's default (True) expires all loaded instances on
+# commit, forcing a full-row re-fetch on the next attribute access, seen
+# adding 100–180ms to WP.activate under pool contention.
+db = SQLAlchemy(session_options={"expire_on_commit": False})
 cache = Cache()
 SQLITE_MODE = os.getenv("USE_SQLITE", "0") == "1"
 
@@ -27,12 +31,41 @@ def get_app():
     return _app_instance
 
 
+# SQLAlchemy's `handle_error` event does not fire on QueuePool checkout
+# timeouts (the exception is raised directly inside Pool._do_get without
+# event dispatch). Subclassing is the only reliable hook.
+from sqlalchemy.exc import TimeoutError as _SAQueuePoolTimeoutError  # noqa: E402
+from sqlalchemy.pool import QueuePool as _BaseQueuePool  # noqa: E402
+
+
+class _InstrumentedQueuePool(_BaseQueuePool):
+    def _do_get(self):
+        try:
+            return super()._do_get()
+        except _SAQueuePoolTimeoutError:
+            from horde import metrics
+
+            metrics.db_pool_timeout.add(1)
+            raise
+
+
 def create_app(config=None):
     global _app_instance
 
     app = Flask(__name__)
     app.config.SWAGGER_UI_DOC_EXPANSION = "list"
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+    # Telemetry MUST be initialised before any other extension (especially
+    # Flask-Limiter) registers a `before_request`. The OTel Flask
+    # instrumentation registers its own `before_request` to stash a span on
+    # `environ`; if Flask-Limiter runs first and short-circuits with a 429,
+    # the OTel hook never executes and the WSGI middleware logs spurious
+    # "Flask environ's OpenTelemetry span missing" warnings on every
+    # rate-limited response.
+    from horde.telemetry import init_telemetry_early
+
+    init_telemetry_early(app)
 
     if config:
         app.config.update(config)
@@ -45,9 +78,19 @@ def create_app(config=None):
             app.config["SQLALCHEMY_DATABASE_URI"] = (
                 f"postgresql://{os.getenv('POSTGRES_USER', 'postgres')}:{os.getenv('POSTGRES_PASS')}@{os.getenv('POSTGRES_URL')}"
             )
+            # Prior default (pool_size=50, max_overflow=-1) let each of N replicas
+            # open up to unlimited connections, easily exceeding Postgres'
+            # max_connections under sustained load. Pool occupancy during
+            # stress was ~100% while *active* queries were <5% of the pool,
+            # i.e. connections were held across non-DB work (kudos torch,
+            # redis, webhook, log formatting). Shrinking the pool surfaces
+            # that inefficiency via QueuePool timeouts instead of PG refusals.
             app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-                "pool_size": 50,
-                "max_overflow": -1,
+                "poolclass": _InstrumentedQueuePool,
+                "pool_size": int(os.getenv("SQLALCHEMY_POOL_SIZE", "15")),
+                "max_overflow": int(os.getenv("SQLALCHEMY_MAX_OVERFLOW", "5")),
+                "pool_timeout": int(os.getenv("SQLALCHEMY_POOL_TIMEOUT", "30")),
+                "pool_pre_ping": os.getenv("SQLALCHEMY_POOL_PRE_PING", "0") == "1",
             }
     app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
     db.init_app(app)

@@ -37,7 +37,8 @@ class InterrogationWorker(WorkerTemplate):
     wtype = "interrogation"
 
     def check_in(self, max_tiles, **kwargs):
-        super().check_in(**kwargs)
+        if not super().check_in(**kwargs):
+            return
         self.max_power = max_tiles
         # If's OK to provide an empty list here as we don't actually modify this var
         # We only check it in can_generate

@@ -38,7 +38,7 @@ from horde.flask import SQLITE_MODE, db
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
 from horde.model_reference import model_reference
-from horde.telemetry import _pop_query_duration
+from horde.metrics import pop_query_duration
 from horde.utils import hash_api_key, validate_regex
 
 ALLOW_ANONYMOUS = True
@@ -990,12 +990,15 @@ def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, p
         has_priority=priority_user_ids is not None,
     ):
         results = final_wp_list.populate_existing().with_for_update(skip_locked=True, of=ImageWaitingPrompt).all()
-    _pop_query_duration.record(_time.monotonic() - t0, {"horde.page": page})
+    pop_query_duration.record(_time.monotonic() - t0, {"horde.page": page})
     return results
 
 
 def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_user_ids=None):
     ## Consolidated into a single query with conditional aggregation (replaces 15+ separate count queries).
+    if models_list is None:
+        models_list = []
+
     bridge_agent = worker.bridge_agent
     can_img2img = check_bridge_capability("img2img", bridge_agent)
     can_inpainting = check_bridge_capability("inpainting", bridge_agent)
@@ -1022,141 +1025,74 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     # Build all conditional count expressions
     count_exprs = {}
 
+    def count_distinct_wp(condition):
+        # Distinct-by-WP avoids overcounting from WPModels/WPAllowedWorkers join fan-out.
+        return func.count(func.distinct(case((condition, ImageWaitingPrompt.id), else_=None)))
+
     # models: WP specifies models that worker doesn't serve
-    count_exprs["models"] = func.sum(
-        case(
-            (and_(WPModels.model.not_in(models_list), WPModels.id != None), 1),  # noqa E712
-            else_=0,
-        ),
-    )
+    count_exprs["models"] = count_distinct_wp(and_(WPModels.model.not_in(models_list), WPModels.id != None))  # noqa E712
 
     # worker_id: WP targets specific workers (allowlist/blocklist)
-    count_exprs["worker_id"] = func.sum(
-        case(
-            (
-                or_(
-                    WPAllowedWorkers.id != None,  # noqa E712
-                    and_(
-                        ImageWaitingPrompt.worker_blacklist.is_(False),
-                        WPAllowedWorkers.worker_id != worker.id,
-                    ),
-                    and_(
-                        ImageWaitingPrompt.worker_blacklist.is_(True),
-                        WPAllowedWorkers.worker_id == worker.id,
-                    ),
-                ),
-                1,
+    count_exprs["worker_id"] = count_distinct_wp(
+        or_(
+            WPAllowedWorkers.id != None,  # noqa E712
+            and_(
+                ImageWaitingPrompt.worker_blacklist.is_(False),
+                WPAllowedWorkers.worker_id != worker.id,
             ),
-            else_=0,
+            and_(
+                ImageWaitingPrompt.worker_blacklist.is_(True),
+                WPAllowedWorkers.worker_id == worker.id,
+            ),
         ),
     )
 
     # max_pixels
-    count_exprs["max_pixels"] = func.sum(
-        case(
-            (ImageWaitingPrompt.width * ImageWaitingPrompt.height >= worker.max_pixels, 1),
-            else_=0,
-        ),
-    )
+    count_exprs["max_pixels"] = count_distinct_wp(ImageWaitingPrompt.width * ImageWaitingPrompt.height >= worker.max_pixels)
 
     # img2img (only counted if worker can't do it)
     if worker.allow_img2img is False or not can_img2img:
-        count_exprs["_img2img_raw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.source_image != None, 1),  # noqa E712
-                else_=0,
-            ),
-        )
+        count_exprs["_img2img_raw"] = count_distinct_wp(ImageWaitingPrompt.source_image != None)  # noqa E712
 
     # painting (only counted if worker can't do it)
     if worker.allow_painting is False or not can_inpainting:
-        count_exprs["_painting_raw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.source_processing.in_(["inpainting", "outpainting"]), 1),
-                else_=0,
-            ),
-        )
+        count_exprs["_painting_raw"] = count_distinct_wp(ImageWaitingPrompt.source_processing.in_(["inpainting", "outpainting"]))
 
     # unsafe_ip
     if worker.allow_unsafe_ipaddr is False:
-        count_exprs["unsafe_ip"] = func.sum(
-            case(
-                (ImageWaitingPrompt.safe_ip == False, 1),  # noqa E712
-                else_=0,
-            ),
-        )
+        count_exprs["unsafe_ip"] = count_distinct_wp(ImageWaitingPrompt.safe_ip == False)  # noqa E712
 
     # nsfw
     if worker.nsfw is False:
-        count_exprs["nsfw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.nsfw == True, 1),  # noqa E712
-                else_=0,
-            ),
-        )
+        count_exprs["nsfw"] = count_distinct_wp(ImageWaitingPrompt.nsfw == True)  # noqa E712
 
     # lora
     if worker.allow_lora is False or not can_lora:
-        count_exprs["_lora_raw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.params.has_key("loras"), 1),
-                else_=0,
-            ),
-        )
+        count_exprs["_lora_raw"] = count_distinct_wp(ImageWaitingPrompt.params.has_key("loras"))
 
     # TI
     if not can_ti:
-        count_exprs["_ti_raw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.params.has_key("tis"), 1),
-                else_=0,
-            ),
-        )
+        count_exprs["_ti_raw"] = count_distinct_wp(ImageWaitingPrompt.params.has_key("tis"))
 
     # post-processing
     if worker.allow_post_processing is False or not can_pp:
-        count_exprs["_pp_raw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.params.has_key("post-processing"), 1),
-                else_=0,
-            ),
-        )
+        count_exprs["_pp_raw"] = count_distinct_wp(ImageWaitingPrompt.params.has_key("post-processing"))
 
     # controlnet
     if worker.allow_controlnet is False or not can_controlnet:
-        count_exprs["_controlnet_raw"] = func.sum(
-            case(
-                (ImageWaitingPrompt.params.has_key("control_type"), 1),
-                else_=0,
-            ),
-        )
+        count_exprs["_controlnet_raw"] = count_distinct_wp(ImageWaitingPrompt.params.has_key("control_type"))
 
     # performance (slow workers)
     if worker.speed <= 500000:
-        count_exprs["_perf_slow"] = func.sum(
-            case(
-                (ImageWaitingPrompt.slow_workers == False, 1),  # noqa E712
-                else_=0,
-            ),
-        )
+        count_exprs["_perf_slow"] = count_distinct_wp(ImageWaitingPrompt.slow_workers == False)  # noqa E712
 
     # performance (extra slow workers)
     if worker.extra_slow_worker is True:
-        count_exprs["_perf_extra_slow"] = func.sum(
-            case(
-                (ImageWaitingPrompt.extra_slow_workers == False, 1),  # noqa E712
-                else_=0,
-            ),
-        )
+        count_exprs["_perf_extra_slow"] = count_distinct_wp(ImageWaitingPrompt.extra_slow_workers == False)  # noqa E712
 
     # untrusted
     if worker.user.trusted is False:
-        count_exprs["untrusted"] = func.sum(
-            case(
-                (ImageWaitingPrompt.trusted_workers == True, 1),  # noqa E712
-                else_=0,
-            ),
-        )
+        count_exprs["untrusted"] = count_distinct_wp(ImageWaitingPrompt.trusted_workers == True)  # noqa E712
 
     # bridge_version (sampler + capability checks)
     bv_conditions = []
@@ -1181,12 +1117,7 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     if not can_layer_diffuse:
         bv_conditions.append(ImageWaitingPrompt.params["transparent"].astext.cast(Boolean).is_(True))
 
-    count_exprs["_bv_sampler"] = func.sum(
-        case(
-            (or_(*bv_conditions), 1),
-            else_=0,
-        ),
-    )
+    count_exprs["_bv_sampler"] = count_distinct_wp(or_(*bv_conditions))
 
     # Execute single query
     query = (
@@ -1197,6 +1128,58 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
         .filter(*base_filters)
     )
 
+    # Keep skipped-count filtering behavior aligned with pop candidate selection.
+    if priority_user_ids:
+        query = query.filter(ImageWaitingPrompt.user_id.in_(priority_user_ids))
+        query = query.filter(
+            or_(
+                worker.maintenance == False,  # noqa E712
+                ImageWaitingPrompt.user_id.in_(priority_user_ids),
+            ),
+            or_(
+                WPAllowedWorkers.id.is_(None),
+                and_(
+                    ImageWaitingPrompt.worker_blacklist.is_(False),
+                    WPAllowedWorkers.worker_id == worker.id,
+                ),
+                and_(
+                    ImageWaitingPrompt.worker_blacklist.is_(True),
+                    WPAllowedWorkers.worker_id != worker.id,
+                ),
+            ),
+        )
+    else:
+        query = query.filter(
+            or_(
+                worker.maintenance == False,  # noqa E712
+                ImageWaitingPrompt.user_id == worker.user_id,
+            ),
+        )
+        if os.getenv("HORDE_REQUIRE_MATCHED_TARGETING", "0") == "1":
+            query = query.filter(
+                or_(
+                    WPAllowedWorkers.id.is_(None),
+                    and_(
+                        ImageWaitingPrompt.worker_blacklist.is_(True),
+                        WPAllowedWorkers.worker_id != worker.id,
+                    ),
+                ),
+            )
+        else:
+            query = query.filter(
+                or_(
+                    WPAllowedWorkers.id.is_(None),
+                    and_(
+                        ImageWaitingPrompt.worker_blacklist.is_(False),
+                        WPAllowedWorkers.worker_id == worker.id,
+                    ),
+                    and_(
+                        ImageWaitingPrompt.worker_blacklist.is_(True),
+                        WPAllowedWorkers.worker_id != worker.id,
+                    ),
+                ),
+            )
+
     row = query.one()
     raw = dict(zip(count_exprs.keys(), row))
 
@@ -1204,11 +1187,11 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     ret_dict = {}
     bridge_version_count = 0
 
-    if raw.get("models", 0) or 0 > 0:
+    if raw.get("models", 0) > 0:
         ret_dict["models"] = raw["models"]
-    if raw.get("worker_id", 0) or 0 > 0:
+    if raw.get("worker_id", 0) > 0:
         ret_dict["worker_id"] = raw["worker_id"]
-    if raw.get("max_pixels", 0) or 0 > 0:
+    if raw.get("max_pixels", 0) > 0:
         ret_dict["max_pixels"] = raw["max_pixels"]
 
     # img2img — attribute to setting or bridge depending on which is the cause
@@ -1266,7 +1249,7 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     if perf_count > 0:
         ret_dict["performance"] = perf_count
 
-    if raw.get("untrusted", 0) or 0 > 0:
+    if raw.get("untrusted", 0) > 0:
         ret_dict["untrusted"] = raw["untrusted"]
 
     # bridge_version sampler/capability

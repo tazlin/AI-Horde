@@ -19,7 +19,7 @@ from horde.redis_ctrl import (
     get_ipaddr_timeout_db,
     is_redis_up,
 )
-from horde.telemetry import _ip_check_duration
+from horde.metrics import ip_check_duration
 
 ip_r = None
 ip_s_r = None
@@ -105,7 +105,7 @@ class CounterMeasures:
             logger.debug(f"IP {ipaddr} has a probability of {probability}. Safe = {is_safe}")
         else:
             ip_span.set_attribute("cached", True)
-        _ip_check_duration.record(_time.monotonic() - t0, {"horde.cached": is_safe is not None})
+        ip_check_duration.record(_time.monotonic() - t0, {"horde.cached": is_safe is not None})
         return is_safe
 
     @staticmethod

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 Haidra Developers
+# SPDX-FileCopyrightText: 2026 Tazlin
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 

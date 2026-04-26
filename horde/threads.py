@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Callable, Optional
 import logfire
 
 from horde.logger import logger
-from horde.telemetry import _job_duration, _job_failures, pyroscope_tag
+from horde.metrics import job_duration, job_failures
+from horde.telemetry import pyroscope_tag
 from horde.vars import horde_instance_id
 
 if TYPE_CHECKING:
@@ -88,10 +89,10 @@ class PrimaryTimedFunction:
                 self.function(*self.args, **self.kwargs)
         except Exception:
             failed = True
-            _job_failures.add(1, {"horde.job.name": job_name})
+            job_failures.add(1, {"horde.job.name": job_name})
             raise
         finally:
-            _job_duration.record(
+            job_duration.record(
                 time.monotonic() - t0,
                 {"horde.job.name": job_name, "horde.job.failed": failed},
             )

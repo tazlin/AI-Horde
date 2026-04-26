@@ -19,11 +19,11 @@ from horde.argparser import args
 from horde.flask import create_app
 from horde.logger import logger, reconfigure_from_args
 from horde.metrics import waitress_metrics
-from horde.telemetry import init_telemetry
+from horde.telemetry import init_telemetry_late
 
 reconfigure_from_args(args)
 app = create_app()
-init_telemetry(app)
+init_telemetry_late(app)
 
 # CLI modes (moved from horde/__init__.py)
 if args.force_subscription:
@@ -59,6 +59,12 @@ if __name__ == "__main__":
         format="%(asctime)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s",
         level=logging.WARNING,
     )
+    # waitress.queue logs "Task queue depth is N" at WARNING for every task
+    # enqueued while no worker thread is idle. Under load this fires thousands
+    # of times per minute and drowns out useful signal. Saturation is already
+    # tracked via the waitress_metrics histogram + telemetry, so silence the
+    # per-event log.
+    logging.getLogger("waitress.queue").setLevel(logging.ERROR)
     import waitress
 
     # Monkeypatch to get metrics until below is done
