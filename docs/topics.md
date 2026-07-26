@@ -31,10 +31,16 @@ procedure for one subject sit together.
 ### accounting
 
 - Explanation: [Kudos accounting, projection, and concurrency](explanation/kudos_accounting.md)
+- How-to: [Kudos ledger operations](how-to/kudos_ledger_operations.md)
+- Reference: [Kudos accounting reference](reference/kudos_accounting.md)
 
 ### kudos
 
 - Explanation: [Kudos accounting, projection, and concurrency](explanation/kudos_accounting.md)
 - How-to: [Kudos ledger operations](how-to/kudos_ledger_operations.md)
+- Reference: [Kudos accounting reference](reference/kudos_accounting.md)
 
+### operations
+
+- How-to: [Kudos ledger operations](how-to/kudos_ledger_operations.md)
 <!-- END GENERATED: topics -->
