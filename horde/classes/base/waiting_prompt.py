@@ -15,11 +15,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import logfire
-from sqlalchemy import JSON, inspect, or_, select
+from sqlalchemy import JSON, func, inspect, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, object_session, relationship
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.sql import expression
 
 from horde import vars as hv
@@ -99,6 +100,8 @@ class WPAllowedWorkers(db.Model):
 
 class WPTrickedWorkers(db.Model):
     __tablename__ = "wp_tricked_workers"
+    # See WPAllowedWorkers: the pop candidate queries probe this table per WP through EXISTS.
+    __table_args__ = (db.Index("ix_wp_tricked_workers_wp_id_worker_id", "wp_id", "worker_id"),)
     id = db.Column(db.Integer, primary_key=True)
     worker_id = db.Column(uuid_column_type(), db.ForeignKey("workers.id"), nullable=False)
     worker = db.relationship("Worker")
@@ -536,19 +539,17 @@ class WaitingPrompt(db.Model):
         #     return None
         # myself_refresh.n -= 1
         safe_amount = worker.get_safe_amount(amount, self)
-        if safe_amount > self.n:
-            safe_amount = self.n
         if self.disable_batching:
             safe_amount = 1
-        # We use a local var to avoid touching the DB through self.n
-        # due to all the commits clearing row lock,
-        # can we can't ensure a race-condition won't have changed self.n between iterations
-        current_n = self.n
+        claim = self.claim_generations(safe_amount, worker)
+        if claim is None:
+            return None
+        # A local var rather than self.n, which another worker may change between the iterations below.
+        current_n, remaining_n = claim
+        safe_amount = current_n - remaining_n
         could_be_first_assignment = current_n == self.jobs
-        self.n -= safe_amount
         payload = self.get_job_payload(current_n)
-        # This does a commit as well
-        self.refresh(worker)
+        db.session.commit()
         procgen_class = procgen_classes[self.wp_type]
         gens_list = []
         dispatch_batch_id = uuid.uuid4()
@@ -620,6 +621,58 @@ class WaitingPrompt(db.Model):
                     logger.warning(f"Unable to validate scheduling forecast for request {self.id}: {err}")
         pop_payload = self.get_pop_payload(gens_list, payload)
         return pop_payload
+
+    def claim_generations(self, wanted: int, worker) -> tuple[int, int] | None:
+        """Take up to ``wanted`` of the generations this request still needs, and extend its expiry as ``refresh`` does.
+
+        The decrement is one statement that locks only this row, so concurrent pops of one request never hand out
+        more generations than it asked for, and no other row is locked while a pop evaluates its candidates.
+
+        Args:
+            wanted: How many generations the worker can take in this pop.
+            worker: The worker taking them. An extra-slow worker sets the long expiry, as ``refresh`` does.
+
+        Returns:
+            The number of generations still needed before and after the claim, or None when the request no longer
+            needs any or has faulted since it was read.
+        """
+        table = WaitingPrompt.__table__
+        claimable = (
+            select(table.c.id, table.c.n)
+            .where(table.c.id == self.id, table.c.n > 0, table.c.faulted.is_(False))
+            .with_for_update()
+            .subquery("claimable")
+        )
+        if worker is not None and worker.extra_slow_worker is True:
+            new_expiry = expression.literal(get_extra_slow_expiry_date())
+        else:
+            new_expiry = func.greatest(table.c.expiry, get_expiry_date())
+        claimed = db.session.execute(
+            update(table)
+            .where(table.c.id == claimable.c.id)
+            .values(n=claimable.c.n - func.least(claimable.c.n, wanted), expiry=new_expiry)
+            .returning(claimable.c.n, table.c.n, table.c.expiry),
+        ).first()
+        if claimed is None:
+            return None
+        before_n, remaining_n, expiry = claimed
+        # The row is already written; record the new values without marking them for another write.
+        set_committed_value(self, "n", remaining_n)
+        set_committed_value(self, "expiry", expiry)
+        return before_n, remaining_n
+
+    def return_generation(self) -> None:
+        """Give back one generation a worker will not deliver, so it is handed out again.
+
+        The increment is applied in the database rather than to a value read earlier, which a concurrent claim would
+        otherwise overwrite.
+        """
+        table = WaitingPrompt.__table__
+        returned_n = db.session.execute(
+            update(table).where(table.c.id == self.id).values(n=table.c.n + 1).returning(table.c.n),
+        ).scalar_one_or_none()
+        if returned_n is not None:
+            set_committed_value(self, "n", returned_n)
 
     def fake_generation(self, worker):
         payload = self.get_job_payload(self.n)

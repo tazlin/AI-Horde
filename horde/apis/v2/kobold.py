@@ -583,16 +583,27 @@ class TextJobPop(JobPopTemplate):
             threads=self.args.threads,
             bridge_agent=self.args.bridge_agent,
         )
+        self.worker_model_names = self.worker.get_model_names()
+        self.worker_softprompt_names = None
 
-    def get_sorted_wp(self, priority_user_ids=None):
+    def get_sorted_wp(self, priority_user_ids, after_candidate=None, limit=database.POP_CANDIDATE_LIMIT):
         """We're sending the lists directly, to avoid having to join tables"""
         sorted_wps = text_database.get_sorted_text_wp_filtered_to_worker(
             self.worker,
             self.models,
             priority_user_ids=priority_user_ids,
-            page=self.wp_page,
+            after_candidate=after_candidate,
+            limit=limit,
         )
         return sorted_wps
+
+    def worker_can_generate(self, wp):
+        # The worker's model and softprompt lists are read once per pop rather than once per candidate.
+        if not wp.softprompt:
+            return self.worker.can_generate_with_softprompt_names(wp, [], model_names=self.worker_model_names)
+        if self.worker_softprompt_names is None:
+            self.worker_softprompt_names = self.worker.get_softprompt_names()
+        return self.worker.can_generate_with_softprompt_names(wp, self.worker_softprompt_names, model_names=self.worker_model_names)
 
 
 class TextJobSubmit(JobSubmitTemplate):

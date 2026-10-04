@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import logfire
-from sqlalchemy import Boolean, and_, case, func, not_, or_
+from sqlalchemy import ARRAY, Boolean, Text, and_, any_, case, exists, func, literal, not_, or_
 from sqlalchemy.orm import contains_eager, joinedload, noload, selectinload, subqueryload
 
 import horde.classes.base.stats as stats
@@ -26,7 +26,7 @@ from horde.classes.base.kudos import KudosLedger, kudos_event
 from horde.classes.base.processing_generation import ProcessingGeneration
 from horde.classes.base.style import Style, StyleCollection, StyleModel, StyleTag
 from horde.classes.base.user import KudosTransferLog, User, UserRecords, UserSharedKey
-from horde.classes.base.waiting_prompt import WaitingPrompt, WPAllowedWorkers, WPModels
+from horde.classes.base.waiting_prompt import WaitingPrompt, WPAllowedWorkers, WPModels, WPTrickedWorkers
 from horde.classes.base.worker import Worker, WorkerMessage, WorkerModel, WorkerPerformance, WorkerTemplate
 from horde.classes.kobold.processing_generation import TextProcessingGeneration
 from horde.classes.kobold.waiting_prompt import TextWaitingPrompt
@@ -1087,14 +1087,117 @@ def _wp_requests_post_processing():
     )
 
 
-def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, priority_user_ids=None, page=0):
+POP_FIRST_READ_LIMIT = 20
+"""How many candidates a pop's first read returns.
+
+A worker evaluates candidates in order and usually claims the first, and every candidate read is loaded with its models
+and targeting rows, so a large first read costs every pop for rows it rarely reaches.
+"""
+
+POP_CANDIDATE_LIMIT = 200
+"""How many candidates each further read returns, once a pop has refused every candidate of the read before.
+
+Large further reads keep the number of reads small when the front of the queue is unservable by this worker.
+"""
+
+
+def pop_candidate_order(wp_class, is_priority_request):
+    """Return the ORDER BY clauses for pop candidates: priority users' requests first, then queue priority, then age.
+
+    The id makes the order total, which a read that continues after its last candidate depends on.
+    """
+    return (
+        case((is_priority_request, 1), else_=0).desc(),
+        wp_class.extra_priority.desc(),
+        wp_class.created.asc(),
+        wp_class.id.asc(),
+    )
+
+
+def after_pop_candidate(wp_class, is_priority_request, after_candidate, priority_user_ids):
+    """Return the condition for candidates that come after ``after_candidate`` in pop candidate order.
+
+    Queue priority only rises while a request waits, so a request raised past ``after_candidate`` between two reads of
+    one pop is not read again in that pop. It is read by the next pop.
+    """
+    later_among_peers = or_(
+        wp_class.extra_priority < after_candidate.extra_priority,
+        and_(
+            wp_class.extra_priority == after_candidate.extra_priority,
+            or_(
+                wp_class.created > after_candidate.created,
+                and_(wp_class.created == after_candidate.created, wp_class.id > after_candidate.id),
+            ),
+        ),
+    )
+    if after_candidate.user_id in priority_user_ids:
+        return or_(~is_priority_request, and_(is_priority_request, later_among_peers))
+    return and_(~is_priority_request, later_among_peers)
+
+
+
+def _escape_like(text: str) -> str:
+    """Escape LIKE wildcards with the default LIKE escape character, so the text matches only itself."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def wp_matches_worker_blacklist(wp_class, worker):
+    """SQL condition: the request's prompt contains a word on the worker's blacklist, compared as ``Worker.can_generate`` does.
+
+    The words are one array parameter, so the statement's shape does not depend on how many a worker has.
+    """
+    patterns = [f"%{_escape_like(blacklisted.word.lower())}%" for blacklisted in worker.blacklist]
+    return func.lower(wp_class.prompt).like(any_(literal(patterns, ARRAY(Text))))
+
+
+def wp_tricks_worker(wp_class, worker):
+    """SQL condition: this worker was once handed a fake job for the request, which ``Worker.can_generate`` refuses."""
+    return exists().where(WPTrickedWorkers.wp_id == wp_class.id, WPTrickedWorkers.worker_id == worker.id)
+
+
+def _image_wp_sampler_supported(worker):
+    """SQL condition: the worker's bridge supports the request's sampler, read from the job payload with the defaults
+    ``ImageWorker.can_generate`` applies: ``k_euler_a`` when the sampler is absent and no karras when that is absent."""
+    gen_payload = ImageWaitingPrompt.gen_payload
+    sampler_name = case((gen_payload.has_key("sampler_name"), gen_payload["sampler_name"].astext), else_="k_euler_a")
+    karras = func.coalesce(gen_payload["karras"].astext.cast(Boolean), False)
+    # Array parameters rather than IN lists keep the statement's shape the same for every bridge.
+    samplers = literal(sorted(get_supported_samplers(worker.bridge_agent, karras=False)), ARRAY(Text))
+    karras_samplers = literal(sorted(get_supported_samplers(worker.bridge_agent, karras=True)), ARRAY(Text))
+    return or_(
+        and_(karras.is_(False), sampler_name == any_(samplers)),
+        and_(karras.is_(True), sampler_name == any_(karras_samplers)),
+    )
+
+
+def get_sorted_wp_filtered_to_worker(
+    worker,
+    models_list=None,
+    blacklist=None,
+    priority_user_ids=None,
+    after_candidate=None,
+    limit=POP_CANDIDATE_LIMIT,
+):
+    """Return up to ``limit`` image requests this worker may serve, in pop candidate order.
+
+    Rows are read without locks; a request is claimed only when handed out, by ``WaitingPrompt.start_generation``.
+
+    Args:
+        worker: The popping worker.
+        models_list: The models the worker declared on this pop.
+        blacklist: The worker's word blacklist.
+        priority_user_ids: The worker owner's id and the ids of its priority users, None meaning the owner alone.
+            Their requests come first, ignore the worker's maintenance mode, and are served when they target the
+            worker even under ``HORDE_REQUIRE_MATCHED_TARGETING``.
+        after_candidate: The last candidate of the previous read in this pop, or None to read from the start.
+        limit: How many candidates to return.
+    """
     import time as _time
 
     t0 = _time.monotonic()
     # This is just the top 3 - Adjusted method to send ImageWorker object. Filters to add.
     # TODO: Filter by ImageWorker not in WP.tricked_worker
     # TODO: If any word in the prompt is in the WP.blacklist rows, then exclude it (L293 in base.worker.ImageWorker.gan_generate())
-    PER_PAGE = 10  # how many requests we're picking up to filter further
     # The model constraint is a semi-join: joining wp_models returns one row per
     # matching model, and the page LIMIT below counts joined rows, so a WP
     # naming several of the worker's models would consume several page slots as
@@ -1132,58 +1235,58 @@ def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, p
                 wp_serves_model,
                 and_(
                     ~wp_names_any_model,
-                    not any("horde_special" in mname for mname in models_list),
-                    "SDXL_beta::stability.ai#6901" not in models_list,
+                    literal(not any("horde_special" in mname for mname in models_list)),
+                    literal("SDXL_beta::stability.ai#6901" not in models_list),
                 ),
             ),
             or_(
                 ImageWaitingPrompt.source_image == None,  # noqa E712
-                worker.allow_img2img == True,  # noqa E712
+                literal(worker.allow_img2img),
             ),
             or_(
                 ImageWaitingPrompt.source_processing.not_in(["inpainting", "outpainting"]),
-                worker.allow_painting == True,  # noqa E712
+                literal(worker.allow_painting),
             ),
             or_(
                 ImageWaitingPrompt.extra_source_images == None,  # noqa E712
-                check_bridge_capability("extra_source_images", worker.bridge_agent),
+                literal(check_bridge_capability("extra_source_images", worker.bridge_agent)),
             ),
             or_(
                 ImageWaitingPrompt.safe_ip == True,  # noqa E712
-                worker.allow_unsafe_ipaddr == True,  # noqa E712
+                literal(worker.allow_unsafe_ipaddr),
             ),
             or_(
                 ImageWaitingPrompt.nsfw == False,  # noqa E712
-                worker.nsfw == True,  # noqa E712
+                literal(worker.nsfw),
             ),
             or_(
                 not_(ImageWaitingPrompt.params.has_key("loras")),
                 and_(
-                    worker.allow_lora == True,  # noqa E712
-                    check_bridge_capability("lora", worker.bridge_agent),
+                    literal(worker.allow_lora),
+                    literal(check_bridge_capability("lora", worker.bridge_agent)),
                 ),
             ),
             or_(
                 not_(ImageWaitingPrompt.params.has_key("tis")),
-                check_bridge_capability("textual_inversion", worker.bridge_agent),
+                literal(check_bridge_capability("textual_inversion", worker.bridge_agent)),
             ),
             or_(
                 not_(_wp_requests_post_processing()),
                 and_(
-                    worker.allow_post_processing == True,  # noqa E712
-                    check_bridge_capability("post-processing", worker.bridge_agent),
+                    literal(worker.allow_post_processing),
+                    literal(check_bridge_capability("post-processing", worker.bridge_agent)),
                 ),
             ),
             or_(
                 not_(ImageWaitingPrompt.params.has_key("control_type")),
                 and_(
-                    worker.allow_controlnet == True,  # noqa E712
-                    check_bridge_capability("controlnet", worker.bridge_agent),
+                    literal(worker.allow_controlnet),
+                    literal(check_bridge_capability("controlnet", worker.bridge_agent)),
                     or_(
                         ImageWaitingPrompt.params["control_type"].astext.in_(LEGACY_IMAGE_CONTROL_TYPES),
                         and_(
-                            check_bridge_capability("extended_controlnet", worker.bridge_agent),
-                            worker.allow_extended_controlnet == True,  # noqa E712
+                            literal(check_bridge_capability("extended_controlnet", worker.bridge_agent)),
+                            literal(worker.allow_extended_controlnet),
                         ),
                     ),
                 ),
@@ -1193,33 +1296,33 @@ def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, p
             or_(
                 ImageWaitingPrompt.params["scheduler"].astext.notin_(EXTENDED_SCHEDULERS),
                 ImageWaitingPrompt.params["scheduler"].is_(None),
-                check_bridge_capability("scheduler", worker.bridge_agent),
+                literal(check_bridge_capability("scheduler", worker.bridge_agent)),
             ),
             or_(
                 ImageWaitingPrompt.params["scheduler"].astext.notin_(SIGMA_GENERATOR_SCHEDULERS),
                 ImageWaitingPrompt.params["scheduler"].is_(None),
-                check_bridge_capability("sigma_generators", worker.bridge_agent),
+                literal(check_bridge_capability("sigma_generators", worker.bridge_agent)),
             ),
             or_(
                 and_(*[ImageWaitingPrompt.params[field].astext.is_(None) for field in SOLVER_KNOB_PARAMS]),
-                check_bridge_capability("solver_options", worker.bridge_agent),
+                literal(check_bridge_capability("solver_options", worker.bridge_agent)),
             ),
             or_(
                 ImageWaitingPrompt.params[FLOW_SHIFT_PARAM].astext.is_(None),
-                check_bridge_capability("flow_shift", worker.bridge_agent),
+                literal(check_bridge_capability("flow_shift", worker.bridge_agent)),
             ),
             or_(
                 ImageWaitingPrompt.params[CONTROL_STRENGTH_PARAM].astext.is_(None),
-                check_bridge_capability("control_strength", worker.bridge_agent),
+                literal(check_bridge_capability("control_strength", worker.bridge_agent)),
             ),
             or_(
-                worker.speed >= 500000,  # 0.5 MPS/s
+                literal(worker.speed >= 500000),  # 0.5 MPS/s
                 ImageWaitingPrompt.slow_workers == True,  # noqa E712
             ),
             or_(
-                worker.extra_slow_worker is False,
+                literal(worker.extra_slow_worker is False),
                 and_(
-                    worker.extra_slow_worker is True,
+                    literal(worker.extra_slow_worker is True),
                     ImageWaitingPrompt.extra_slow_workers.is_(True),
                 ),
             ),
@@ -1227,82 +1330,59 @@ def get_sorted_wp_filtered_to_worker(worker, models_list=None, blacklist=None, p
                 not_(ImageWaitingPrompt.params.has_key("transparent")),
                 ImageWaitingPrompt.params["transparent"].astext.cast(Boolean).is_(False),
                 and_(
-                    check_bridge_capability("layer_diffuse", worker.bridge_agent),
-                    worker.allow_sdxl_controlnet == True,  # noqa E712
+                    literal(check_bridge_capability("layer_diffuse", worker.bridge_agent)),
+                    literal(worker.allow_sdxl_controlnet),
                 ),
             ),
         )
     )
-    # logger.debug(final_wp_list)
-    if priority_user_ids:
-        final_wp_list = final_wp_list.filter(ImageWaitingPrompt.user_id.in_(priority_user_ids))
-        final_wp_list = final_wp_list.filter(
-            # Workers in maintenance can still pick up their owner or their friends
-            or_(
-                worker.maintenance == False,  # noqa E712
-                ImageWaitingPrompt.user_id.in_(priority_user_ids),
-            ),
-            or_(
-                ~wp_has_worker_targets,
-                and_(
-                    ImageWaitingPrompt.worker_blacklist.is_(False),
-                    wp_targets_this_worker,
-                ),
-                and_(
-                    ImageWaitingPrompt.worker_blacklist.is_(True),
-                    ~wp_targets_this_worker,
-                ),
-            ),
+    # These repeat checks of Worker.can_generate, so a refused request does not take a place among the candidates.
+    # can_generate still runs on every candidate, so each condition here may only refuse what it refuses.
+    worker_owner_trusted = worker.user.trusted
+    final_wp_list = final_wp_list.filter(
+        or_(ImageWaitingPrompt.trusted_workers.is_(False), literal(worker_owner_trusted)),
+        ~wp_tricks_worker(ImageWaitingPrompt, worker),
+        # Untrusted workers are not given untrusted requesters from unsafe addresses.
+        or_(literal(worker_owner_trusted), ImageWaitingPrompt.safe_ip.is_(True), ImageWaitingPrompt.user.has(User.trusted)),
+        _image_wp_sampler_supported(worker),
+        ~wp_matches_worker_blacklist(ImageWaitingPrompt, worker),
+    )
+    if not priority_user_ids:
+        # A worker's owner is a priority user of every pop it makes.
+        priority_user_ids = [worker.user_id]
+    is_priority_request = ImageWaitingPrompt.user_id.in_(priority_user_ids)
+    targeting_admits_worker = or_(
+        ~wp_has_worker_targets,
+        and_(ImageWaitingPrompt.worker_blacklist.is_(False), wp_targets_this_worker),
+        and_(ImageWaitingPrompt.worker_blacklist.is_(True), ~wp_targets_this_worker),
+    )
+    # Under HORDE_REQUIRE_MATCHED_TARGETING a request that names its workers reaches them only from a priority user.
+    if os.getenv("HORDE_REQUIRE_MATCHED_TARGETING", "0") == "1":
+        general_targeting_admits_worker = or_(
+            ~wp_has_worker_targets,
+            and_(ImageWaitingPrompt.worker_blacklist.is_(True), ~wp_targets_this_worker),
         )
     else:
-        final_wp_list = final_wp_list.filter(
-            or_(
-                worker.maintenance == False,  # noqa E712
-                ImageWaitingPrompt.user_id == worker.user_id,
-            ),
-        )
-        # If HORDE_REQUIRE_MATCHED_TARGETING is set to 1, we disable using WPAllowedWorkers
-        # Targeted requests will only be picked up in the condition above as it will include the
-        # filter to ensure the worker also has that user as a priority
-        if os.getenv("HORDE_REQUIRE_MATCHED_TARGETING", "0") == "1":
-            final_wp_list = final_wp_list.filter(
-                or_(
-                    ~wp_has_worker_targets,
-                    and_(
-                        ImageWaitingPrompt.worker_blacklist.is_(True),
-                        ~wp_targets_this_worker,
-                    ),
-                ),
-            )
-        else:
-            final_wp_list = final_wp_list.filter(
-                or_(
-                    ~wp_has_worker_targets,
-                    and_(
-                        ImageWaitingPrompt.worker_blacklist.is_(False),
-                        wp_targets_this_worker,
-                    ),
-                    and_(
-                        ImageWaitingPrompt.worker_blacklist.is_(True),
-                        ~wp_targets_this_worker,
-                    ),
-                ),
-            )
-
-    # logger.debug(final_wp_list)
-    final_wp_list = (
-        final_wp_list.order_by(ImageWaitingPrompt.extra_priority.desc(), ImageWaitingPrompt.created.asc())
-        .offset(PER_PAGE * page)
-        .limit(PER_PAGE)
+        general_targeting_admits_worker = targeting_admits_worker
+    final_wp_list = final_wp_list.filter(
+        or_(
+            and_(is_priority_request, targeting_admits_worker),
+            # Workers in maintenance serve only their owner, whose requests are always priority requests.
+            and_(~is_priority_request, literal(not worker.maintenance), general_targeting_admits_worker),
+        ),
     )
+    if after_candidate is not None:
+        final_wp_list = final_wp_list.filter(
+            after_pop_candidate(ImageWaitingPrompt, is_priority_request, after_candidate, priority_user_ids),
+        )
+    final_wp_list = final_wp_list.order_by(*pop_candidate_order(ImageWaitingPrompt, is_priority_request)).limit(limit)
     with logfire.span(
         "horde.db.get_sorted_wp",
         worker_id=str(worker.id),
-        page=page,
-        has_priority=priority_user_ids is not None,
+        continued=after_candidate is not None,
     ):
-        results = final_wp_list.populate_existing().with_for_update(skip_locked=True, of=ImageWaitingPrompt).all()
-    pop_query_duration.record(_time.monotonic() - t0, {"horde.page": page})
+        results = final_wp_list.populate_existing().all()
+    pop_query_duration.record(_time.monotonic() - t0, {"horde.continued": after_candidate is not None})
     return results
 
 
@@ -1442,6 +1522,10 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
     # performance (extra slow workers)
     if worker.extra_slow_worker is True:
         count_exprs["_perf_extra_slow"] = count_distinct_wp(ImageWaitingPrompt.extra_slow_workers == False)  # noqa E712
+
+    # blacklist
+    if worker.blacklist:
+        count_exprs["blacklist"] = count_distinct_wp(wp_matches_worker_blacklist(ImageWaitingPrompt, worker))
 
     # untrusted
     if worker.user.trusted is False:
@@ -1586,6 +1670,8 @@ def count_skipped_image_wp(worker, models_list=None, blacklist=None, priority_us
 
     if raw.get("untrusted", 0) > 0:
         ret_dict["untrusted"] = raw["untrusted"]
+    if raw.get("blacklist", 0) > 0:
+        ret_dict["blacklist"] = raw["blacklist"]
 
     # bridge_version sampler/capability
     bv_sampler = raw.get("_bv_sampler", 0) or 0

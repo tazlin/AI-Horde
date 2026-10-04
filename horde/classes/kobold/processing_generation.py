@@ -162,7 +162,7 @@ class TextProcessingGeneration(ProcessingGeneration):
         state_t0 = time.monotonic()
         state = kwargs.get("state", "ok")
         if state == "faulted":
-            self.wp.n += 1
+            self.wp.return_generation()
             self.abort()
         elif state in ("censored", "csam"):
             self.censored = True

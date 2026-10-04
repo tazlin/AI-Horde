@@ -17,6 +17,7 @@ The concepts they assume (what a worker is, what a job's lifecycle means) are in
 <!-- BEGIN GENERATED: documents (gen_doc_index.py) -->
 | Document | Summary |
 | --- | --- |
+| [Worker job selection reference](worker_job_selection.md) | Which queued request a popping image or text worker receives: candidate order, priority users, the filters, the claim that hands a request out, and what a worker is told when it receives nothing. |
 | [Prompt provenance reference](prompt_provenance.md) | What each stored prompt value means, who may read the original submission, and why a missing original is never filled in. |
 | [Moderation operations reference](moderation_operations.md) | What the horde retains when a prompt is rejected or a worker reports a job or draws suspicion, when retention removes it, and the moderator API for it and for promotion and paused-worker review. |
 | [Kudos accounting reference](kudos_accounting.md) | The mutation and consumption contract: accounting events, projection targets, reservations, the lock order, and the read models. |

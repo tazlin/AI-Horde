@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, literal, or_
 from sqlalchemy.orm import joinedload, noload, selectinload
 
 import horde.classes.base.stats as stats
@@ -20,7 +20,13 @@ from horde.classes.kobold.processing_generation import TextProcessingGeneration
 # FIXME: Renamed for backwards compat. To fix later
 from horde.classes.kobold.waiting_prompt import TextWaitingPrompt
 from horde.classes.kobold.worker import TextWorker, get_minimum_text_worker_speed
-from horde.database.functions import query_prioritized_wps
+from horde.database.functions import (
+    POP_CANDIDATE_LIMIT,
+    after_pop_candidate,
+    pop_candidate_order,
+    query_prioritized_wps,
+    wp_tricks_worker,
+)
 from horde.flask import SQLITE_MODE, db
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
@@ -32,13 +38,30 @@ def convert_things_to_kudos(things, **kwargs):
     return round(things, 2)
 
 
-def get_sorted_text_wp_filtered_to_worker(worker, models_list=None, priority_user_ids=None, page=0):
+def get_sorted_text_wp_filtered_to_worker(
+    worker,
+    models_list=None,
+    priority_user_ids=None,
+    after_candidate=None,
+    limit=POP_CANDIDATE_LIMIT,
+):
+    """Return up to ``limit`` text requests this worker may serve, in pop candidate order.
+
+    Rows are read without locks; a request is claimed only when handed out, by ``WaitingPrompt.start_generation``.
+    Priority users' requests come first but are otherwise filtered like any other request.
+
+    Args:
+        worker: The popping worker.
+        models_list: The models the worker declared on this pop.
+        priority_user_ids: The worker owner's id and the ids of its priority users. None means the owner alone.
+        after_candidate: The last candidate of the previous read in this pop, or None to read from the start.
+        limit: How many candidates to return.
+    """
     # This is just the top 3 - Adjusted method to send Worker object. Filters to add.
     # TODO: Filter by (Worker in WP.workers) __ONLY IF__ len(WP.workers) >=1
     # TODO: Filter by WP.trusted_workers == False __ONLY IF__ Worker.user.trusted == False
     # TODO: Filter by Worker not in WP.tricked_worker
     # TODO: If any word in the prompt is in the WP.blacklist rows, then exclude it (L293 in base.worker.Worker.gan_generate())
-    PER_PAGE = 3  # how many requests we're picking up to filter further
     slow_speed = get_minimum_text_worker_speed(models_list)
     # The model constraint is a semi-join: joining wp_models returns one row per
     # matching model, and the page LIMIT below counts joined rows, so a WP
@@ -74,11 +97,11 @@ def get_sorted_text_wp_filtered_to_worker(worker, models_list=None, priority_use
             TextWaitingPrompt.expiry > datetime.utcnow(),
             or_(
                 TextWaitingPrompt.safe_ip == True,  # noqa E712
-                worker.allow_unsafe_ipaddr == True,  # noqa E712
+                literal(worker.allow_unsafe_ipaddr),
             ),
             or_(
                 TextWaitingPrompt.nsfw == False,  # noqa E712
-                worker.nsfw == True,  # noqa E712
+                literal(worker.nsfw),
             ),
             or_(
                 wp_serves_model,
@@ -96,29 +119,32 @@ def get_sorted_text_wp_filtered_to_worker(worker, models_list=None, priority_use
                 ),
             ),
             or_(
-                worker.speed >= slow_speed,  # Slow speed is based on the model parameters used
+                literal(worker.speed >= slow_speed),  # Slow speed is based on the model parameters used
                 TextWaitingPrompt.slow_workers == True,  # noqa E712
             ),
             or_(
-                worker.maintenance == False,  # noqa E712
+                literal(not worker.maintenance),
                 TextWaitingPrompt.user_id == worker.user_id,
             ),
             or_(
-                is_backed_validated(worker.bridge_agent),
+                literal(is_backed_validated(worker.bridge_agent)),
                 TextWaitingPrompt.validated_backends.is_(False),
             ),
         )
     )
-    if priority_user_ids:
-        final_wp_list = final_wp_list.filter(TextWaitingPrompt.user_id.in_(priority_user_ids))
-    # logger.debug(final_wp_list)
-    final_wp_list = (
-        final_wp_list.order_by(TextWaitingPrompt.extra_priority.desc(), TextWaitingPrompt.created.asc())
-        .offset(PER_PAGE * page)
-        .limit(PER_PAGE)
-    )
-    # logger.debug(final_wp_list.all())
-    return final_wp_list.populate_existing().with_for_update(skip_locked=True, of=TextWaitingPrompt).all()
+    # Repeats a check of Worker.can_generate, which still runs on every candidate. The text pop reports refusals only
+    # from can_generate, so checks with a reported reason stay there rather than move here.
+    final_wp_list = final_wp_list.filter(~wp_tricks_worker(TextWaitingPrompt, worker))
+    if not priority_user_ids:
+        # A worker's owner is a priority user of every pop it makes.
+        priority_user_ids = [worker.user_id]
+    is_priority_request = TextWaitingPrompt.user_id.in_(priority_user_ids)
+    if after_candidate is not None:
+        final_wp_list = final_wp_list.filter(
+            after_pop_candidate(TextWaitingPrompt, is_priority_request, after_candidate, priority_user_ids),
+        )
+    final_wp_list = final_wp_list.order_by(*pop_candidate_order(TextWaitingPrompt, is_priority_request)).limit(limit)
+    return final_wp_list.populate_existing().all()
 
 
 def get_text_wp_by_id(wp_id, lite=False):

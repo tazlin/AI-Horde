@@ -843,7 +843,9 @@ class ImageJobPop(JobPopTemplate):
             if "kudos" in post_ret.get("skipped", {}):
                 db_skipped["kudos"] = post_ret["skipped"]["kudos"]
             if "blacklist" in post_ret.get("skipped", {}):
-                db_skipped["blacklist"] = post_ret["skipped"]["blacklist"]
+                # The candidate query refuses blacklisted prompts and the queue-wide count reports them; a prompt
+                # it let through and the worker's own check refused is not in that count.
+                db_skipped["blacklist"] = db_skipped.get("blacklist", 0) + post_ret["skipped"]["blacklist"]
             if "step_count" in post_ret.get("skipped", {}):
                 db_skipped["step_count"] = post_ret["skipped"]["step_count"]
             if "bridge_version" in post_ret.get("skipped", {}):
@@ -876,17 +878,23 @@ class ImageJobPop(JobPopTemplate):
             sampler_execution_contract_version=self.args.sampler_execution_contract_version,
             priority_usernames=self.priority_usernames,
         )
+        self.worker_model_names = self.worker.get_model_names()
 
-    def get_sorted_wp(self, priority_user_ids=None):
+    def get_sorted_wp(self, priority_user_ids, after_candidate=None, limit=database.POP_CANDIDATE_LIMIT):
         """We're sending the lists directly, to avoid having to join tables"""
         sorted_wps = database.get_sorted_wp_filtered_to_worker(
             self.worker,
             self.models,
             self.blacklist,
             priority_user_ids=priority_user_ids,
-            page=self.wp_page,
+            after_candidate=after_candidate,
+            limit=limit,
         )
         return sorted_wps
+
+    def worker_can_generate(self, wp):
+        # The worker's model list is read once per pop rather than once per candidate.
+        return self.worker.can_generate_with_model_names(wp, self.worker_model_names)
 
 
 class ImageJobSubmit(JobSubmitTemplate):

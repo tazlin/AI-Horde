@@ -83,14 +83,15 @@ def _candidate_ids_for_worker(app) -> set[str]:
     candidate_ids: set[str] = set()
     with app.app_context():
         worker = db.session.query(ImageWorker).filter_by(name=WORKER_NAME).one()
-        for page in range(MAX_CANDIDATE_PAGES):
-            wp_list = database.get_sorted_wp_filtered_to_worker(worker, TEST_MODELS, [], page=page)
-            if not wp_list:
-                break
+        after_candidate = None
+        for _ in range(MAX_CANDIDATE_PAGES):
+            wp_list = database.get_sorted_wp_filtered_to_worker(worker, TEST_MODELS, [], after_candidate=after_candidate)
             candidate_ids.update(str(wp.id) for wp in wp_list)
+            if len(wp_list) < database.POP_CANDIDATE_LIMIT:
+                break
+            after_candidate = wp_list[-1]
         else:
-            pytest.fail(f"worker candidate list exceeded {MAX_CANDIDATE_PAGES} pages")
-        # The candidate query locks the rows it returns.
+            pytest.fail(f"worker candidate list exceeded {MAX_CANDIDATE_PAGES} reads")
         db.session.rollback()
     return candidate_ids
 

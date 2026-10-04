@@ -69,6 +69,7 @@ procedure for one subject sit together.
 - How-to: [Use the style endpoints](how-to/use_style_endpoints.md)
 - How-to: [Add style authoring and styled requests to a frontend](how-to/add_styles_to_a_frontend.md)
 - How-to: [Update an existing style integration](how-to/update_a_style_integration.md)
+- Reference: [Worker job selection reference](reference/worker_job_selection.md)
 - Reference: [Prompt provenance reference](reference/prompt_provenance.md)
 - Reference: [Moderation operations reference](reference/moderation_operations.md)
 - Reference: [Style contract reference](reference/style_contract.md)
@@ -77,6 +78,7 @@ procedure for one subject sit together.
 
 - Explanation: [Request feasibility and queue pressure](explanation/request_feasibility_and_queue_pressure.md)
 - How-to: [Add an image baseline](how-to/add_image_baseline.md)
+- Reference: [Worker job selection reference](reference/worker_job_selection.md)
 - Reference: [Image baseline policy reference](reference/baseline_policy.md)
 - Reference: [Image model reference loader reference](reference/model_reference.md)
 <!-- END GENERATED: topics -->

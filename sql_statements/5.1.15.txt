@@ -1,0 +1,14 @@
+-- Run with psql in its default autocommit mode. Do not pass --single-transaction:
+-- CREATE INDEX CONCURRENTLY cannot run inside a transaction block. Pass
+-- -v ON_ERROR_STOP=1 so a failure stops the migration. A failed concurrent build
+-- leaves an INVALID index; drop it and rerun after correcting the cause.
+--
+-- The pop candidate queries refuse requests that once handed the popping worker a
+-- fake job, through an EXISTS probe per candidate:
+--   ... AND NOT EXISTS (SELECT 1 FROM wp_tricked_workers WHERE wp_id = ? AND worker_id = ?)
+-- Without an index each probe scans the table. The probe is correct with or
+-- without the index, so this can be applied before or after deploying 5.1.15.
+SET lock_timeout = '3s';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_wp_tricked_workers_wp_id_worker_id
+  ON wp_tricked_workers (wp_id, worker_id);

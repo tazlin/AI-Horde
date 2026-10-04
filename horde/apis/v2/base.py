@@ -1064,7 +1064,6 @@ class JobPopTemplate(Resource):
             db.session.commit()
         pop_check_in_duration.record(time.monotonic() - check_in_t0, {"horde.gentype": self.gentype})
         # This ensures that the priority requested by the bridge is respected
-        self.prioritized_wp = []
         # self.priority_users = [self.user]
         ## Start prioritize by bridge request ##
         pre_priority_user_ids = [x.split("#")[-1] for x in self.priority_usernames]
@@ -1083,26 +1082,21 @@ class JobPopTemplate(Resource):
         #     priority_user = database.find_user_by_username(priority_username)
         #     if priority_user:
         #        self.priority_users.append(priority_user)
-        self.wp_page = 0
-        with logfire.span("horde.pop.get_sorted_wp", priority=True, page=0):
-            wp_list = self.get_sorted_wp(self.priority_user_ids)
-        self.priority_wp_ids = {wp.id for wp in wp_list}
-        for wp in wp_list:
-            self.prioritized_wp.append(wp)
-        ## End prioritize by bridge request ##
-        with logfire.span("horde.pop.get_sorted_wp", priority=False, page=0):
-            for wp in self.get_sorted_wp():
-                if wp.id not in [wp.id for wp in self.prioritized_wp]:
-                    self.prioritized_wp.append(wp)
-        # logger.warning(datetime.utcnow())
+        # Candidates come in one priority-first order without row locks; a request is claimed only when
+        # handed out (WaitingPrompt.start_generation), so no request is hidden from other workers while this
+        # pop evaluates it. A further read continues after the last candidate only when a whole read was refused.
         candidates_evaluated = 0
         pop_pre_eval_duration.record(time.monotonic() - pre_eval_t0, {"horde.gentype": self.gentype})
         eval_t0 = time.monotonic()
         with logfire.span("horde.pop.evaluate_candidates") as eval_span:
-            while len(self.prioritized_wp) > 0:
-                for wp in self.prioritized_wp:
+            after_candidate = None
+            read_limit = database.POP_FIRST_READ_LIMIT
+            while True:
+                with logfire.span("horde.pop.get_sorted_wp", continued=after_candidate is not None):
+                    candidates = self.get_sorted_wp(self.priority_user_ids, after_candidate, read_limit)
+                for wp in candidates:
                     candidates_evaluated += 1
-                    check_gen = self.worker.can_generate(wp)
+                    check_gen = self.worker_can_generate(wp)
                     if not check_gen[0]:
                         skipped_reason = check_gen[1]
                         # We don't report on secret skipped reasons
@@ -1118,24 +1112,20 @@ class JobPopTemplate(Resource):
                             else:
                                 pop_skipped.add(1, {"horde.skip_reason": skipped_reason, "horde.gentype": self.gentype})
                         continue
-                    # There is a chance that by the time we finished all the checks, another worker picked up the WP.
-                    # So we do another final check here before picking it up to avoid sending the same WP to two workers by mistake.
-                    # time.sleep(random.uniform(0, 1))
                     if not wp.needs_gen():  # this says if < 1
                         continue
                     sg_t0 = time.monotonic()
                     with logfire.span("horde.pop.start_generation", wp_id=str(wp.id)):
                         worker_ret = self.start_worker(
                             wp,
-                            selected_from_priority_queue=wp.id in self.priority_wp_ids,
+                            selected_from_priority_queue=wp.user_id in self.priority_user_ids,
                         )
                     pop_start_gen_duration.record(time.monotonic() - sg_t0, {"horde.gentype": self.gentype})
-                    pop_eval_duration.record(time.monotonic() - eval_t0, {"horde.outcome": "match", "horde.gentype": self.gentype})
-                    worker_ret["messages"] = database.get_all_active_worker_messages(self.worker.id)
-                    # logger.debug(worker_ret)
+                    # Another worker claimed what this request had left after it was read.
                     if worker_ret is None:
                         continue
-                    # logger.debug(worker_ret)
+                    pop_eval_duration.record(time.monotonic() - eval_t0, {"horde.outcome": "match", "horde.gentype": self.gentype})
+                    worker_ret["messages"] = database.get_all_active_worker_messages(self.worker.id)
                     eval_span.set_attribute("horde.candidates_evaluated", candidates_evaluated)
                     pop_candidates.record(candidates_evaluated, {"horde.gentype": self.gentype})
                     pop_returned_jobs.record(
@@ -1143,12 +1133,11 @@ class JobPopTemplate(Resource):
                         {"horde.outcome": "match", "horde.gentype": self.gentype},
                     )
                     return worker_ret, 200
-                db.session.commit()  # Unlock all locked wp rows before picking up new ones
-                self.wp_page += 1
-                self.priority_wp_ids = set()
-                with logfire.span("horde.pop.get_sorted_wp", priority=False, page=self.wp_page):
-                    self.prioritized_wp = self.get_sorted_wp()
-                logger.debug(f"Couldn't find WP. Checking next page: {self.wp_page}")
+                if len(candidates) < read_limit:
+                    break
+                after_candidate = candidates[-1]
+                read_limit = database.POP_CANDIDATE_LIMIT
+                logger.debug(f"No servable request in {len(candidates)} candidates. Reading on.")
             eval_span.set_attribute("horde.candidates_evaluated", candidates_evaluated)
             pop_candidates.record(candidates_evaluated, {"horde.gentype": self.gentype})
             pop_eval_duration.record(time.monotonic() - eval_t0, {"horde.outcome": "no_match", "horde.gentype": self.gentype})
@@ -1159,13 +1148,24 @@ class JobPopTemplate(Resource):
         # logger.debug(self.skipped)
         return {"id": None, "ids": [], "skipped": self.skipped, "messages": database.get_all_active_worker_messages(self.worker.id)}, 200
 
-    def get_sorted_wp(self, priority_user_ids=None):
-        """Extendable class to retrieve the sorted WP list for this worker"""
+    def get_sorted_wp(self, priority_user_ids, after_candidate=None, limit=database.POP_CANDIDATE_LIMIT):
+        """Return the next candidates for this worker, priority users' requests first.
+
+        Args:
+            priority_user_ids: The worker owner's id and the ids of its priority users.
+            after_candidate: The last candidate of the previous read, or None to read from the start.
+            limit: How many candidates to return.
+        """
         return database.get_sorted_wp_filtered_to_worker(
             self.worker,
             priority_user_ids=priority_user_ids,
-            page=self.wp_page,
+            after_candidate=after_candidate,
+            limit=limit,
         )
+
+    def worker_can_generate(self, wp):
+        """Return whether this pop's worker can serve a candidate, and the reason when it cannot."""
+        return self.worker.can_generate(wp)
 
     # Making it into its own function to allow extension
     def start_worker(self, wp, *, selected_from_priority_queue: bool = False):
