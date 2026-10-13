@@ -1815,6 +1815,47 @@ class TestGenerationsGivenBack:
 
 
 @pytest.mark.parametrize("gentype", GENTYPES)
+def test_a_fault_and_a_delivery_by_one_worker_for_one_request_do_not_deadlock(client, app, requester, owner, gentype):
+    """A delivery locks the worker row and then the request row; a fault takes them in the same order.
+
+    A separate transaction stands in for the delivery: it locks the worker row, waits until the faulted submit is
+    under way, then updates the request row as a delivery's usage record does. Taking the request row first, the
+    fault deadlocked with it and one of the two failed.
+    """
+    import threading
+    import time
+
+    from sqlalchemy import text
+
+    from horde.flask import db
+
+    worker = Worker(client, app, owner, _config(gentype, amount=2))
+    request_id = _submit(client, gentype, requester, "faulted while delivered", params={"n": 2})
+    faulted_job, _delivered_job = worker.pop()["ids"]
+    with app.app_context():
+        worker_id = db.session.execute(text("SELECT id FROM workers WHERE name = :name"), {"name": worker.name}).scalar_one()
+        db.session.remove()
+    outcome: dict[str, Any] = {}
+
+    def submit_fault() -> None:
+        with app.app_context():
+            outcome["status"] = submit_job(app.test_client(), gentype, owner, faulted_job, "faulted").status_code
+            db.session.remove()
+
+    with app.app_context(), db.engine.connect() as delivery:
+        delivery.execute(text("UPDATE workers SET uncompleted_jobs = uncompleted_jobs WHERE id = :id"), {"id": worker_id})
+        fault = threading.Thread(target=submit_fault)
+        fault.start()
+        time.sleep(1.5)
+        delivery.execute(text("UPDATE waiting_prompts SET consumed_kudos = consumed_kudos WHERE id = :id"), {"id": request_id})
+        delivery.commit()
+    fault.join(timeout=30)
+
+    assert outcome.get("status") == 200, outcome
+    assert read_request(app, request_id)["n"] == 1
+
+
+@pytest.mark.parametrize("gentype", GENTYPES)
 def test_workers_with_different_settings_share_one_candidate_query(client, app, make_api_user, gentype):
     """The candidate query's SQL does not depend on worker settings, so it is compiled once rather than per worker."""
     from sqlalchemy import event

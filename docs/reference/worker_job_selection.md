@@ -159,13 +159,16 @@ and does not overwrite, a concurrent claim. A request that reached a terminal ou
 expired) takes nothing back, and a fake job gives nothing back. A second faulted submit of a job, one racing it, or one
 sent after the job was delivered or timed out therefore changes nothing. Cancelling a request writes `n = 0` in the
 database (`stop_generations`), so a generation given back after the cancellation read the request is not handed out.
+The fault, the worker's dropped-job count and the generation given back commit together, locking the job, the worker
+and the request in that order, as a delivery does.
 
 A request is done when it needs nothing, has no job out, and its delivered jobs reach what it asked for; a faulted job
 counts as neither delivered nor out.
 
 Tests: `TestBatching`, `test_an_image_worker_takes_fewer_large_images_than_its_amount`, `TestClaimAfterRead`,
 `TestConcurrentPops`, `TestReturnedGenerations`, `TestReturnedGenerationsDuringClaims`,
-`test_no_committed_state_has_a_claim_spent_without_its_jobs`, `TestGenerationsGivenBack`.
+`test_no_committed_state_has_a_claim_spent_without_its_jobs`, `TestGenerationsGivenBack`,
+`test_a_fault_and_a_delivery_by_one_worker_for_one_request_do_not_deadlock`.
 
 ## What a worker is told
 

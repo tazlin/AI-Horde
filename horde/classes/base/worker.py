@@ -607,7 +607,13 @@ class WorkerTemplate(db.Model):
             db.session.commit()
         logger.trace(f"modified {kudos} worker kudos stat ({action}) for {self.id}")
 
-    def log_aborted_job(self):
+    def log_aborted_job(self, *, commit: bool = True):
+        """Count a job this worker failed to deliver, and put it into maintenance past the hourly threshold.
+
+        Args:
+            commit: Commit the count. ``ProcessingGeneration.fault`` passes False to commit it with the fault, having
+                flushed it first so the worker row is locked before the request row, as a delivery locks them.
+        """
         # We count the number of jobs aborted in an 1 hour period. So we only log the new timer each time an hour expires.
         if (datetime.utcnow() - self.last_aborted_job).total_seconds() > 3600:
             self.aborted_jobs = 0
@@ -636,7 +642,10 @@ class WorkerTemplate(db.Model):
             self.report_suspicion(reason=Suspicions.TOO_MANY_JOBS_ABORTED)
             self.aborted_jobs = 0
         self.uncompleted_jobs += 1
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        else:
+            db.session.flush()
 
     # def is_slow(self):
 

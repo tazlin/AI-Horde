@@ -387,6 +387,9 @@ class ProcessingGeneration(db.Model):
         and none does once the job was delivered. Only that one gives the generation back, and only to a request still
         waiting for it (``WaitingPrompt.return_generation``); a fake job claimed nothing and gives nothing back.
 
+        The job, the worker's count and the generation given back commit together, and lock their rows in the order a
+        delivery does (job, worker, request), so a fault and a delivery by one worker for one request cannot deadlock.
+
         Returns:
             True when this call faulted the job.
         """
@@ -400,9 +403,9 @@ class ProcessingGeneration(db.Model):
         if faulted is None:
             return False
         set_committed_value(self, "faulted", True)
+        self.worker.log_aborted_job(commit=False)
         if not self.fake:
             self.wp.return_generation()
-        self.worker.log_aborted_job()
         self.log_aborted_generation()
         db.session.commit()
         self._record_capacity_return()
