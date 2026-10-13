@@ -32,6 +32,8 @@ helpers, and Locust event hooks stay in coherent modules:
   and queue-pressure populations).
 - `locustsuite/shapes.py`, `helpers.py`, and `ground_truth.py` hold the staged
   load profiles, shared request helpers, and the attribution oracle.
+- `locustsuite/pop_ledger.py` holds the pop-selection scenario's ledger and
+  oracles.
 
 The `locustfile*.py` files at the top of `tests/stress/` are thin entrypoints
 that re-export the User classes Locust should discover:
@@ -50,6 +52,10 @@ that re-export the User classes Locust should discover:
   nonsense tokens, reviews the evidence listing as a moderator (following
   `text_url` links and checking digests), and probes the moderation surface the
   way an attacker would. See [Moderation evidence scenario](#moderation-evidence-scenario).
+- `locustfile_pop_selection.py` drives the image and text pop endpoints with
+  isolated lanes of workers and requesters and judges, from the harness's own
+  timestamps, whether every worker received what the job selection rules allow.
+  See [Pop selection scenario](#pop-selection-scenario).
 
 ## Prerequisites
 
@@ -272,6 +278,9 @@ artifacts into a verdict.
 
 - `check_moderation_results.py` gates a moderation evidence run on what the
   backend recorded. See [Checking the run](#checking-the-run).
+
+- `check_pop_selection_results.py` gates a pop-selection run on its oracle
+  evidence and coverage. See [Pop selection scenario](#pop-selection-scenario).
 
 - `analyze_hot_user_convoy.py` and `analyze_queue_pressure.py` correlate a
   run's artifacts into a phase-aligned verdict. Each reads a run directory
@@ -567,3 +576,94 @@ before the response that set a timeout arrived may still be rejected. A timeout
 that follows a filter rejection says nothing about the model threshold, so the
 onset check then tests only its upper bound.
 
+
+## Pop selection scenario
+
+`locustfile_pop_selection.py` exercises worker job selection
+(`docs/reference/worker_job_selection.md`): which queued request a popping
+worker receives, how many generations it is handed, and what it is told when it
+receives nothing. Every user records what it sends and receives in
+`locustsuite/pop_ledger.py`; when the run stops, the scenario reads every
+request's final status and the ledger's oracles judge the whole run.
+
+### What the oracles prove
+
+The server does the work of an HTTP call between the instant the client sent it
+and the instant the response arrived. From those two instants alone the oracles
+derive what the server certainly could, or certainly could not, have done, and
+report only observations outside those bounds. No oracle assumes anything about
+row locks, read sizes or queries, so a violation is something a worker or
+requester can see.
+
+| Oracle | Violation |
+| --- | --- |
+| `pop_overclaim` | A request was handed out more often than its `n` plus the generations that could have been given back before the pop was answered: one per job whose first faulted submit was sent before its delivery was acknowledged, or whose ttl ran out undelivered. |
+| `pop_overdelivered` | A status read reported more finished generations than the request asked for. |
+| `pop_turned_away` | A worker received nothing (or `WorkerMaintenance`) while a request it may serve was certainly queued with a generation left: queued before the pop was sent, not cancelled before it was answered, and not claimable by any pop of its lane sent before the answer (an unanswered pop or a server error counts as having claimed its whole amount). |
+| `pop_priority_bypassed` | A worker with priority users received a stranger's request while a request of its owner or priority users certainly waited, however many unservable priority requests were queued ahead of it. |
+| `pop_order` | A worker received a newer request of one requester while an older one, queued before the newer one was sent, certainly waited. |
+| `pop_targeting`, `pop_blacklist` | A request reached a worker it does not name, or the worker it excludes; a prompt containing a blacklisted word (lowercase substring, as `Worker.can_generate` compares) reached the worker. |
+| `pop_maintenance` | A worker certainly in maintenance received someone else's request, or received nothing with 200 instead of `WorkerMaintenance`, or was refused with `WorkerMaintenance` when certainly not in maintenance. |
+| `pop_trick_repeat` | A worker received a request again after a fake job for it. |
+| `pop_after_cancel` | A request was handed out by a pop sent after its cancellation was acknowledged. |
+| `pop_skipped_underreported` | A blacklisting image worker that received nothing was told of fewer blacklisted requests than certainly waited. |
+| `pop_generation_attribution` | A finished generation names a worker that was never handed that request, or more often than it was handed. |
+| `pop_lost_generation` | At the end, with nothing processing, a request reports fewer waiting generations than it asked for minus those finished, on every read: the server gives a timed-out job back in two commits, so a suspect is read again a few seconds later. |
+| `pop_done_regressed` | A request reported done and a later read of it reported not done. |
+| `pop_probe`, `pop_server_error` | A malformed or extreme pop was answered with a server error or against its validation; any other request of the scenario was answered with a server error. |
+
+Whether a paused worker's job was fake is decided after the run, once every
+request is known: a pop can be handed a request before its requester has the
+response that queued it. A pop overlapping a maintenance or pause transition is
+not judged on either side of it. `tests/unit/test_pop_ledger.py` holds each
+oracle to both directions: legal interleavings, however unlucky their timing,
+are not reported, and each violation is.
+
+### Lanes
+
+Each lane has models only its own workers serve, so its workers see only its
+requests. Text lanes use run-scoped model names; image lanes use known models
+(`--pop-image-models lane=model,...` overrides them), and the run refuses to
+start while a worker outside the scenario serves one of them. At the end the
+scenario cancels its unfinished requests so the next run starts from an empty
+queue.
+
+| Lane | Population | Behaviour under test |
+| --- | --- | --- |
+| `swarm` | Six workers with batch sizes from 1 to 20, two of them popping under one identity; four requesters with `n` up to 6 that disable batching, name or exclude workers, and cancel. Workers fault and abandon jobs. | No request beyond its `n`; no worker turned away while work remains; targeting and cancellation. |
+| `prio` | Two workers listing eight priority flooders, two priority requesters, unknown users, their own owner and a duplicate; one general worker. Flooders keep up to 240 requests queued that every lane worker refuses on its own check (text: trusted workers for untrusted owners; image: steps over `limit_max_steps`), at higher queue priority than everyone. Rich strangers outrank the penniless priority requesters. | A servable priority request is served before strangers however many unservable priority requests are ahead of it (coverage counts serves behind 20 and 220 of them). |
+| `fifo` | One requester, one worker, single-generation requests. | Oldest first. |
+| `maint` | A worker toggling maintenance, with requests from its owner, a priority user and a stranger, and a helper worker. | Maintenance serves only the owner and answers `WorkerMaintenance` otherwise. |
+| `paused` | A worker paused by a moderator for `--pop-pause-seconds`, then resumed; requests from a stranger and its owner. | Fake jobs claim nothing, the owner is served for real, and a faked request never returns to that worker. |
+| `adversary` | Workers that fault a job twice, three times concurrently, or after delivering it. | A generation is given back once at most. |
+| `faults` | Honest workers faulting half their jobs on requests of 2 to 4 generations. | Every faulted generation is handed out again until the request has what it asked for. |
+| `blacklist`, `unicode` | Image workers blacklisting `%`, `_`, `\`, `a_c` and `Zebra`, or `istanbul` and `straße`, with clean and dirty prompts and a slow drain worker. | Wildcard-looking words match only themselves; the query refuses only what the worker's own check refuses. |
+| `probe` | Pops with malformed priority usernames, out-of-range amounts, huge model and blacklist lists, NUL bytes. | Refused or ignored, never a server error. |
+
+Each worker identity drops (faults or abandons) at most 15 jobs, below the 20 an
+hour after which the server puts a worker into maintenance.
+
+### Running it
+
+The scenario mints its own accounts through `POST /api/v2/dev/test-user`, so
+the server needs `HORDE_TEST_APIKEYS=1` and loopback access. Run it with
+`HORDE_TEST_RATELIMIT_DISABLED=1`; a throttled run leaves the oracles little to
+judge. Several server instances on one database spread the load and make the
+pops genuinely concurrent; list them with `--pop-hosts`.
+
+```
+locust -f tests/stress/locustfile_pop_selection.py --host http://localhost:7001 \
+    --pop-hosts http://localhost:7001,http://localhost:7002,http://localhost:7003 \
+    --headless --users 100 --spawn-rate 50 --run-time 300s \
+    --pop-evidence pop_evidence.jsonl --pop-ledger-dump pop_ledger.jsonl \
+    --csv pop --only-summary
+python tests/stress/check_pop_selection_results.py --evidence pop_evidence.jsonl --stats pop_stats.csv
+```
+
+The checker fails on any violation and on coverage below its floors (a run that
+never served a priority request behind 220 unservable ones, or never popped
+concurrently, proves nothing). `--min key=count` changes a floor,
+`--skip-coverage` drops them for runs with lanes disabled (`--pop-lanes`), and
+`--expect oracle:pop_overclaim` inverts the gate to require a known defect.
+`--pop-ledger-dump` keeps every observation, and `PopLedger.load(path).evaluate()`
+judges it again offline.
