@@ -426,3 +426,65 @@ class TestAssignMonthlyKudos:
 
         make_api_user(kudos=100)  # ensure at least one extra user row exists
         assign_monthly_kudos()  # must not raise
+
+
+class TestRefreshWorkerSpeeds:
+    def _register(self, client, make_api_user, name: str) -> str:
+        from sqlalchemy import text
+
+        from horde.flask import db
+
+        owner = make_api_user(trusted=True, kudos=100)
+        resp = client.post(
+            "/api/v2/generate/text/pop",
+            json={"name": name, "models": [TEXT_MODEL], "bridge_agent": AGENT, "max_context_length": 4096, "max_length": 512},
+            headers=_headers(owner.api_key),
+        )
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        worker_id = db.session.execute(text("SELECT id FROM workers WHERE name = :name"), {"name": name}).scalar_one()
+        from horde.classes.base.worker import WorkerPerformance
+
+        db.session.add(WorkerPerformance(worker_id=worker_id, performance=1234.0))
+        db.session.commit()
+        return worker_id
+
+    def test_a_worker_row_held_elsewhere_does_not_hold_up_the_rest(self, client, app, make_api_user):
+        """The refresh skips a worker whose row another transaction holds, refreshing it on a later tick.
+
+        Waiting for that row while holding the rest of its chunk let the refresh close a deadlock cycle with submits.
+        """
+        import threading
+        import uuid
+
+        from sqlalchemy import text
+
+        from horde.database.threads import refresh_worker_speeds
+        from horde.flask import db
+
+        with app.app_context():
+            held = self._register(client, make_api_user, f"Speed Held {uuid.uuid4().hex[:6]}")
+            free = self._register(client, make_api_user, f"Speed Free {uuid.uuid4().hex[:6]}")
+            db.session.remove()
+
+        def speed(worker_id: str) -> float:
+            with app.app_context():
+                value = db.session.execute(text("SELECT speed FROM workers WHERE id = :id"), {"id": worker_id}).scalar_one()
+                db.session.remove()
+            return value
+
+        with app.app_context(), db.engine.connect() as holder:
+            holder.execute(text("UPDATE workers SET threads = threads WHERE id = :id"), {"id": held})
+            refresh = threading.Thread(target=refresh_worker_speeds)
+            refresh.start()
+            refresh.join(timeout=10)
+            finished_while_held = not refresh.is_alive()
+            holder.commit()
+        refresh.join(timeout=30)
+
+        assert finished_while_held
+        assert speed(free) == 1234.0
+        assert speed(held) != 1234.0
+
+        refresh_worker_speeds()
+
+        assert speed(held) == 1234.0

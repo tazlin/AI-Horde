@@ -787,7 +787,11 @@ def refresh_worker_speeds() -> None:
     The rewrite runs as chunked UPDATEs of ``WORKER_SPEED_REFRESH_CHUNK`` workers,
     each committed before the next, so the row locks it takes never cover the whole
     active fleet at once; pop check-ins and the kudos applier fold update the same
-    rows concurrently and must only ever wait out one chunk. The prune commits
+    rows concurrently and must only ever wait out one chunk. Each chunk locks its
+    rows in id order and skips those another transaction holds, which keep their
+    speed until a later tick: waiting for one of them while holding the rest of the
+    chunk let this refresh close a deadlock cycle with two submits, each holding a
+    worker or user row the other wanted. The prune commits
     first on its own: retention and the average need no shared atomicity, since a
     sample appended between the two only moves the average toward a value a later
     tick would store anyway.
@@ -844,12 +848,21 @@ def refresh_worker_speeds() -> None:
         refreshed = 0
         for start in range(0, len(recent_worker_id_list), WORKER_SPEED_REFRESH_CHUNK):
             chunk = recent_worker_id_list[start : start + WORKER_SPEED_REFRESH_CHUNK]
-            refreshed += db.session.execute(
-                update(workers_table)
-                .where(workers_table.c.id.in_(chunk))
-                .values(speed=refreshed_speed)
-                .execution_options(synchronize_session=False),
-            ).rowcount
+            locked = [
+                row[0]
+                for row in db.session.query(workers_table.c.id)
+                .filter(workers_table.c.id.in_(chunk))
+                .order_by(workers_table.c.id)
+                .with_for_update(skip_locked=True)
+                .all()
+            ]
+            if locked:
+                refreshed += db.session.execute(
+                    update(workers_table)
+                    .where(workers_table.c.id.in_(locked))
+                    .values(speed=refreshed_speed)
+                    .execution_options(synchronize_session=False),
+                ).rowcount
             db.session.commit()
         if pruned or refreshed:
             logger.debug(f"Refreshed speed on {refreshed} workers and pruned {pruned} surplus performance samples")
