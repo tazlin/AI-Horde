@@ -1267,7 +1267,16 @@ class JobPopTemplate(Resource):
                 user_id=self.user.id,
                 name=self.worker_name,
             )
-            self.worker.create()
+            try:
+                self.worker.create()
+            except IntegrityError:
+                # A concurrent first pop under the same name created the worker between the lookup and this insert.
+                db.session.rollback()
+                self.worker = database.find_worker_by_name(self.worker_name, worker_class=self.worker_class)
+                if self.worker is None:
+                    if database.worker_name_exists(self.worker_name):
+                        raise e.PolymorphicNameConflict(self.worker_name) from None
+                    raise
         if self.user != self.worker.user:
             raise e.WrongCredentials(self.user.get_unique_alias(), self.worker_name)
 

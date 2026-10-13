@@ -1389,6 +1389,75 @@ class TestConcurrentPops:
         assert empty == [], f"{len(empty)} of {len(results)} pops found no job while {total_jobs} jobs were queued"
 
 
+def _post_concurrently(app, posts: list[tuple[str, dict[str, Any], str]]) -> list[tuple[int, dict[str, Any]]]:
+    """Send every ``(url, body, api_key)`` post at once, each on its own thread, and return each status and body."""
+    import threading
+
+    from horde.flask import db
+
+    responses: list[tuple[int, dict[str, Any]]] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(len(posts))
+
+    def run(url: str, body: dict[str, Any], api_key: str) -> None:
+        try:
+            with app.app_context():
+                thread_client = app.test_client()
+                barrier.wait()
+                resp = thread_client.post(url, json=body, headers=_headers(api_key))
+                db.session.remove()
+                with lock:
+                    responses.append((resp.status_code, resp.get_json() or {}))
+        except BaseException as err:  # noqa: BLE001 - re-raised on the test thread below
+            with lock:
+                errors.append(err)
+
+    threads = [threading.Thread(target=run, args=post) for post in posts]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    return responses
+
+
+def _workers_named(app, name: str) -> list[str]:
+    from sqlalchemy import text
+
+    from horde.flask import db
+
+    with app.app_context():
+        rows = db.session.execute(text("SELECT worker_type FROM workers WHERE name = :name"), {"name": name}).scalars().all()
+        db.session.remove()
+    return list(rows)
+
+
+POP_URLS = {"image": "/api/v2/generate/pop", "text": "/api/v2/generate/text/pop"}
+
+
+@pytest.mark.parametrize("gentype", GENTYPES)
+def test_concurrent_first_pops_under_one_new_name_create_one_worker(app, owner, gentype):
+    name = f"pop-selection-{uuid.uuid4().hex[:10]}"
+    body = _config(gentype).payload(name)
+
+    responses = _post_concurrently(app, [(POP_URLS[gentype], body, owner.api_key)] * 8)
+
+    assert [status for status, _ in responses] == [200] * 8, responses
+    assert len(_workers_named(app, name)) == 1
+
+
+def test_concurrent_first_pops_of_two_kinds_under_one_new_name_create_one_worker(app, owner):
+    name = f"pop-selection-{uuid.uuid4().hex[:10]}"
+    posts = [(POP_URLS[gentype], _config(gentype).payload(name), owner.api_key) for gentype in GENTYPES] * 4
+
+    responses = _post_concurrently(app, posts)
+
+    assert all(status == 200 or body.get("rc") == "PolymorphicNameConflict" for status, body in responses), responses
+    assert len(_workers_named(app, name)) == 1
+
+
 @pytest.fixture
 def change_after_read(app, monkeypatch):
     """Return a helper that edits a request in its own transaction right after a pop reads its candidates.
