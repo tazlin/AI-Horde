@@ -11,8 +11,9 @@ from typing import Any
 
 import logfire
 import requests
-from sqlalchemy import JSON
+from sqlalchemy import JSON, update
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.sql import expression
 
 from horde.classes.base.kudos import kudos_event
@@ -378,15 +379,34 @@ class ProcessingGeneration(db.Model):
             return 0
         return kudos
 
-    def abort(self):
-        """Called when this request needs to be stopped without rewarding kudos. Say because it timed out due to a worker crash"""
-        if self.is_completed() or self.is_faulted():
-            return
-        self.faulted = True
+    def fault(self) -> bool:
+        """End this job as faulted, without reward, and give its generation back to its request.
+
+        Called when the worker reports the job faulted and when the job outlives its ttl. The transition is a
+        compare-and-set on the job, so however many faulted submits or timeouts race for one job, exactly one faults it,
+        and none does once the job was delivered. Only that one gives the generation back, and only to a request still
+        waiting for it (``WaitingPrompt.return_generation``); a fake job claimed nothing and gives nothing back.
+
+        Returns:
+            True when this call faulted the job.
+        """
+        table = ProcessingGeneration.__table__
+        faulted = db.session.execute(
+            update(table)
+            .where(table.c.id == self.id, table.c.generation.is_(None), table.c.faulted.is_(False))
+            .values(faulted=True)
+            .returning(table.c.id),
+        ).first()
+        if faulted is None:
+            return False
+        set_committed_value(self, "faulted", True)
+        if not self.fake:
+            self.wp.return_generation()
         self.worker.log_aborted_job()
         self.log_aborted_generation()
         db.session.commit()
         self._record_capacity_return()
+        return True
 
     def _record_capacity_return(self) -> None:
         """Record one returned worker thread when this pop batch is terminal."""

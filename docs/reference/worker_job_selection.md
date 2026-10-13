@@ -152,12 +152,20 @@ The claim commits together with the jobs it creates. Every generation a request 
 of: still needed (`n`), out with a worker, or delivered; a reader never sees generations taken that no job carries,
 which a status read would report as done.
 
-A generation given back (a faulted submission, a timed-out job) increments `n` in the database
-(`return_generation`), so it is not lost to, and does not overwrite, a concurrent claim.
+A job ends undelivered once (`ProcessingGeneration.fault`): when its worker submits it faulted or it outlives its ttl,
+a compare-and-set marks it faulted unless it was already delivered or faulted. Only that transition gives its
+generation back, by incrementing `n` in the database (`return_generation`), so a generation given back is not lost to,
+and does not overwrite, a concurrent claim. A request that reached a terminal outcome (cancelled, completed, faulted,
+expired) takes nothing back, and a fake job gives nothing back. A second faulted submit of a job, one racing it, or one
+sent after the job was delivered or timed out therefore changes nothing. Cancelling a request writes `n = 0` in the
+database (`stop_generations`), so a generation given back after the cancellation read the request is not handed out.
+
+A request is done when it needs nothing, has no job out, and its delivered jobs reach what it asked for; a faulted job
+counts as neither delivered nor out.
 
 Tests: `TestBatching`, `test_an_image_worker_takes_fewer_large_images_than_its_amount`, `TestClaimAfterRead`,
 `TestConcurrentPops`, `TestReturnedGenerations`, `TestReturnedGenerationsDuringClaims`,
-`test_no_committed_state_has_a_claim_spent_without_its_jobs`.
+`test_no_committed_state_has_a_claim_spent_without_its_jobs`, `TestGenerationsGivenBack`.
 
 ## What a worker is told
 

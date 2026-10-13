@@ -665,7 +665,7 @@ class ImageAsyncStatus(Resource):
             recorded_at=cancelled_at,
             commit=False,
         )
-        wp.n = 0
+        wp.stop_generations()
         wp.jobs = wp_status["finished"]
         if not commit_request_cancellation(wp):
             return (wp_status, 200)

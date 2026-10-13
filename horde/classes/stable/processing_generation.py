@@ -123,9 +123,7 @@ class ImageProcessingGeneration(ProcessingGeneration):
             #     }
             #     upload_prompt(prompt_dict)
         elif state == "faulted":
-            if self.wp.count_finished_jobs() < self.wp.jobs:
-                self.wp.return_generation()
-            self.abort()
+            self.fault()
         submit_state_handling_duration.record(time.monotonic() - state_t0, {"horde.gentype": "image"})
         if self.is_completed():
             return 0

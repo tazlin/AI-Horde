@@ -374,9 +374,7 @@ def check_waiting_prompts():
             )
             modifed_procgens = 0
             for proc_gen in all_proc_gen:
-                if proc_gen.is_stale():
-                    proc_gen.abort()
-                    proc_gen.wp.return_generation()
+                if proc_gen.is_stale() and proc_gen.fault():
                     modifed_procgens += 1
             if modifed_procgens >= 1:
                 db.session.commit()

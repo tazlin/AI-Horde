@@ -485,7 +485,7 @@ class TextAsyncStatus(Resource):
             recorded_at=cancelled_at,
             commit=False,
         )
-        wp.n = 0
+        wp.stop_generations()
         if not commit_request_cancellation(wp):
             return (wp_status, 200)
         if cancellation_claimed:

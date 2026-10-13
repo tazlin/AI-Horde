@@ -1538,25 +1538,22 @@ def _claim_one_elsewhere(app, request_id: str) -> None:
 class TestReturnedGenerationsDuringClaims:
     """A generation given back while another worker claims from the same request keeps both changes."""
 
-    def test_a_fault_reported_while_another_worker_claims_keeps_the_claim(self, client, app, requester, owner, monkeypatch):
+    @pytest.mark.parametrize("gentype", GENTYPES)
+    def test_a_fault_reported_while_another_worker_claims_keeps_the_claim(self, client, app, requester, owner, monkeypatch, gentype):
         from horde.classes.base.waiting_prompt import WaitingPrompt
 
-        worker = Worker(client, app, owner, ImageWorkerConfig())
-        request_id = submit_image(client, requester, "two wanted", params={"n": 2})
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "two wanted", params={"n": 2})
         job = worker.pop()
         assert read_request(app, request_id)["n"] == 1
-        count_finished_jobs = WaitingPrompt.count_finished_jobs
+        return_generation = WaitingPrompt.return_generation
 
-        def count_while_another_worker_claims(self):
+        def return_while_another_worker_claims(self):
             _claim_one_elsewhere(app, request_id)
-            return count_finished_jobs(self)
+            return return_generation(self)
 
-        monkeypatch.setattr(WaitingPrompt, "count_finished_jobs", count_while_another_worker_claims)
-        resp = client.post(
-            "/api/v2/generate/submit",
-            json={"id": job["id"], "generation": "", "state": "faulted", "seed": 0},
-            headers=_headers(owner.api_key),
-        )
+        monkeypatch.setattr(WaitingPrompt, "return_generation", return_while_another_worker_claims)
+        resp = submit_job(client, gentype, owner, job["id"], "faulted")
 
         assert resp.status_code == 200, resp.get_data(as_text=True)
         # One left, one claimed elsewhere, one given back.
@@ -1586,14 +1583,233 @@ class TestReturnedGenerationsDuringClaims:
             procgen.start_time = datetime.utcnow() - timedelta(hours=1)
             db.session.commit()
             db.session.remove()
-        abort = ProcessingGeneration.abort
+        from horde.classes.base.waiting_prompt import WaitingPrompt
 
-        def abort_while_another_worker_claims(self):
+        return_generation = WaitingPrompt.return_generation
+
+        def return_while_another_worker_claims(self):
             _claim_one_elsewhere(app, request_id)
-            return abort(self)
+            return return_generation(self)
 
-        monkeypatch.setattr(ProcessingGeneration, "abort", abort_while_another_worker_claims)
+        monkeypatch.setattr(WaitingPrompt, "return_generation", return_while_another_worker_claims)
         check_waiting_prompts()
+
+        assert read_request(app, request_id)["n"] == 1
+
+
+def request_status(client, gentype: str, request_id: str) -> dict[str, Any]:
+    # The full status rather than the image check, whose answer is cached briefly.
+    url = f"/api/v2/generate/text/status/{request_id}" if gentype == "text" else f"/api/v2/generate/status/{request_id}"
+    resp = client.get(url, headers={"Client-Agent": CLIENT_AGENT})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return resp.get_json()
+
+
+def cancel_request(client, gentype: str, requester: ApiUser, request_id: str) -> None:
+    url = f"/api/v2/generate/text/status/{request_id}" if gentype == "text" else f"/api/v2/generate/status/{request_id}"
+    resp = client.delete(url, headers=_headers(requester.api_key))
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+
+def submit_concurrently(app, gentype: str, owner: ApiUser, job_id: str, states: list[str]) -> list[int]:
+    """Submit one job once per state, every submit on its own thread at once, and return the response statuses."""
+    import threading
+
+    from horde.flask import db
+
+    statuses: list[int] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(len(states))
+
+    def run(state: str) -> None:
+        try:
+            with app.app_context():
+                thread_client = app.test_client()
+                barrier.wait()
+                resp = submit_job(thread_client, gentype, owner, job_id, state)
+                db.session.remove()
+                with lock:
+                    statuses.append(resp.status_code)
+        except BaseException as err:  # noqa: BLE001 - re-raised on the test thread below
+            with lock:
+                errors.append(err)
+
+    threads = [threading.Thread(target=run, args=(state,)) for state in states]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    return statuses
+
+
+@pytest.mark.parametrize("gentype", GENTYPES)
+class TestGenerationsGivenBack:
+    """A generation comes back to its request once per job that ended undelivered, and only while the request waits.
+
+    Whatever a worker submits, and however often, a request is handed out exactly as many generations as it lacks.
+    """
+
+    def test_a_job_faulted_twice_gives_back_one_generation(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "faulted twice")
+        job = worker.pop()
+
+        assert submit_job(client, gentype, owner, job["id"], "faulted").status_code == 200
+        submit_job(client, gentype, owner, job["id"], "faulted")
+
+        assert read_request(app, request_id)["n"] == 1
+        assert prompt_of(worker.pop()) == "faulted twice"
+        assert worker.pop()["id"] is None
+
+    def test_concurrent_faults_of_one_job_give_back_one_generation(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "faulted at once")
+        job = worker.pop()
+
+        statuses = submit_concurrently(app, gentype, owner, job["id"], ["faulted"] * 4)
+
+        assert all(status < 500 for status in statuses), statuses
+        assert read_request(app, request_id)["n"] == 1
+        assert prompt_of(worker.pop()) == "faulted at once"
+        assert worker.pop()["id"] is None
+
+    def test_a_delivery_racing_faults_of_its_job_ends_it_one_way(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "delivered or faulted")
+        job = worker.pop()
+
+        statuses = submit_concurrently(app, gentype, owner, job["id"], ["ok", "faulted", "faulted"])
+
+        assert all(status < 500 for status in statuses), statuses
+        status = request_status(client, gentype, request_id)
+        left = read_request(app, request_id)["n"]
+        # Either the delivery won and nothing came back, or a fault won, one generation came back and nothing finished.
+        assert (status["finished"], left) in ((1, 0), (0, 1)), (status, left)
+
+    def test_a_job_faulted_after_its_delivery_gives_nothing_back(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "delivered then faulted")
+        job = worker.pop()
+        assert submit_job(client, gentype, owner, job["id"]).status_code == 200
+
+        late = submit_job(client, gentype, owner, job["id"], "faulted")
+
+        assert late.status_code == 400
+        assert late.get_json()["rc"] == "DuplicateGen"
+        assert read_request(app, request_id)["n"] == 0
+        assert worker.pop()["id"] is None
+        status = request_status(client, gentype, request_id)
+        assert (status["finished"], status["done"]) == (1, True)
+
+    def test_a_job_faulted_after_it_timed_out_gives_nothing_more_back(self, client, app, requester, owner, gentype):
+        from datetime import datetime, timedelta
+
+        from horde.classes.base.processing_generation import ProcessingGeneration
+        from horde.database.threads import check_waiting_prompts
+        from horde.flask import db
+
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "timed out then faulted")
+        job = worker.pop()
+        with app.app_context():
+            db.session.get(ProcessingGeneration, job["id"]).start_time = datetime.utcnow() - timedelta(hours=1)
+            db.session.commit()
+            db.session.remove()
+        check_waiting_prompts()
+        assert read_request(app, request_id)["n"] == 1
+
+        submit_job(client, gentype, owner, job["id"], "faulted")
+
+        assert read_request(app, request_id)["n"] == 1
+
+    def test_a_job_faulted_after_its_request_was_cancelled_is_not_handed_out_again(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "cancelled then faulted")
+        job = worker.pop()
+        cancel_request(client, gentype, requester, request_id)
+
+        assert submit_job(client, gentype, owner, job["id"], "faulted").status_code == 200
+
+        assert read_request(app, request_id)["n"] == 0
+        assert worker.pop()["id"] is None
+
+    def test_a_generation_given_back_while_its_request_is_cancelled_is_not_handed_out(
+        self,
+        client,
+        app,
+        requester,
+        owner,
+        monkeypatch,
+        gentype,
+    ):
+        """A fault committed after the cancellation read the request still ends in a request that needs nothing."""
+        from sqlalchemy import text
+
+        from horde.classes.base.waiting_prompt import WaitingPrompt
+        from horde.flask import db
+
+        worker = Worker(client, app, owner, _config(gentype))
+        request_id = _submit(client, gentype, requester, "cancelled while given back")
+        worker.pop()
+        assert read_request(app, request_id)["n"] == 0
+        claim_terminal_outcome = WaitingPrompt.claim_terminal_outcome
+
+        def give_back_then_claim(self, *args, **kwargs):
+            with db.engine.connect() as connection:
+                connection.execute(text("UPDATE waiting_prompts SET n = n + 1 WHERE id = :id"), {"id": request_id})
+                connection.commit()
+            return claim_terminal_outcome(self, *args, **kwargs)
+
+        monkeypatch.setattr(WaitingPrompt, "claim_terminal_outcome", give_back_then_claim)
+        cancel_request(client, gentype, requester, request_id)
+        monkeypatch.undo()
+
+        assert read_request(app, request_id)["n"] == 0
+        assert worker.pop()["id"] is None
+
+    def test_a_request_gets_every_generation_however_many_of_its_jobs_fault(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype, amount=2))
+        request_id = _submit(client, gentype, requester, "two wanted", params={"n": 2})
+        first, second = worker.pop()["ids"]
+        assert submit_job(client, gentype, owner, first, "faulted").status_code == 200
+        assert submit_job(client, gentype, owner, second).status_code == 200
+        (third,) = worker.pop()["ids"]
+        assert submit_job(client, gentype, owner, third, "faulted").status_code == 200
+
+        (fourth,) = worker.pop()["ids"]
+        assert submit_job(client, gentype, owner, fourth).status_code == 200
+
+        status = request_status(client, gentype, request_id)
+        assert (status["finished"], status["done"]) == (2, True)
+        assert worker.pop()["id"] is None
+
+    def test_a_request_with_a_job_still_out_is_not_done(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype, amount=2))
+        request_id = _submit(client, gentype, requester, "two wanted", params={"n": 2})
+        for job_id in worker.pop()["ids"]:
+            assert submit_job(client, gentype, owner, job_id, "faulted").status_code == 200
+        third, fourth = worker.pop()["ids"]
+
+        assert submit_job(client, gentype, owner, third).status_code == 200
+        # Two faulted jobs and one delivery are as many as were asked for, but a generation is still out.
+        assert request_status(client, gentype, request_id)["done"] is False
+
+        assert submit_job(client, gentype, owner, fourth).status_code == 200
+        status = request_status(client, gentype, request_id)
+        assert (status["finished"], status["done"]) == (2, True)
+
+    def test_a_fake_job_faulted_gives_nothing_back(self, client, app, requester, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        worker.set(paused=True)
+        request_id = _submit(client, gentype, requester, "faked")
+        fake = worker.pop()
+        assert prompt_of(fake) == "faked"
+        assert read_request(app, request_id)["n"] == 1
+
+        submit_job(client, gentype, owner, fake["id"], "faulted")
 
         assert read_request(app, request_id)["n"] == 1
 

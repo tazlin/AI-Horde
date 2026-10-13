@@ -15,7 +15,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import logfire
-from sqlalchemy import JSON, func, inspect, or_, select, update
+from sqlalchemy import JSON, func, inspect, select, update
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.mutable import MutableDict
@@ -663,18 +663,30 @@ class WaitingPrompt(db.Model):
         set_committed_value(self, "expiry", expiry)
         return before_n, remaining_n
 
-    def return_generation(self) -> None:
+    def return_generation(self) -> bool:
         """Give back one generation a worker will not deliver, so it is handed out again.
+
+        Only ``ProcessingGeneration.fault`` calls this, once per job that was out with a worker. A request that reached
+        a terminal outcome (cancelled, completed, faulted, expired) or is faulted takes nothing back: it is not handed
+        out again.
 
         The increment is applied in the database rather than to a value read earlier, which a concurrent claim would
         otherwise overwrite.
+
+        Returns:
+            True when the request took the generation back.
         """
         table = WaitingPrompt.__table__
         returned_n = db.session.execute(
-            update(table).where(table.c.id == self.id).values(n=table.c.n + 1).returning(table.c.n),
+            update(table)
+            .where(table.c.id == self.id, table.c.terminal_outcome.is_(None), table.c.faulted.is_(False))
+            .values(n=table.c.n + 1)
+            .returning(table.c.n),
         ).scalar_one_or_none()
-        if returned_n is not None:
-            set_committed_value(self, "n", returned_n)
+        if returned_n is None:
+            return False
+        set_committed_value(self, "n", returned_n)
+        return True
 
     def fake_generation(self, worker):
         payload = self.get_job_payload(self.n)
@@ -707,17 +719,26 @@ class WaitingPrompt(db.Model):
 
         return prompt_payload
 
-    def count_finished_jobs(self):
+    def stop_generations(self) -> None:
+        """Hand out nothing more of this request: set what it still needs to zero in the database.
+
+        Written as a statement rather than through the loaded value, which a generation given back since it was read
+        has changed: assigning the stale zero would not be written, and the generation would be handed out again.
+        """
+        table = WaitingPrompt.__table__
+        db.session.execute(update(table).where(table.c.id == self.id).values(n=0))
+        set_committed_value(self, "n", 0)
+
+    def count_delivered_jobs(self):
+        """Count the jobs a worker delivered. A faulted job delivered nothing: it gave its generation back to ``n``."""
         procgen_class = procgen_classes[self.wp_type]
         return (
             db.session.query(procgen_class.wp_id)
             .filter(
                 procgen_class.wp_id == self.id,
                 procgen_class.fake.is_(False),
-                or_(
-                    procgen_class.faulted.is_(True),
-                    procgen_class.generation != None,  # noqa E712
-                ),
+                procgen_class.faulted.is_(False),
+                procgen_class.generation != None,  # noqa E712
             )
             .count()
         )
@@ -740,9 +761,9 @@ class WaitingPrompt(db.Model):
             return True
         if self.needs_gen():
             return False
-        if self.count_finished_jobs() - self.count_processing_jobs() < self.jobs:
+        if self.count_processing_jobs() > 0:
             return False
-        return True
+        return self.count_delivered_jobs() >= self.jobs
 
     def count_processing_gens(self):
         ret_dict = {
@@ -1005,7 +1026,7 @@ class WaitingPrompt(db.Model):
                 recorded_at=cancelled_at,
                 commit=False,
             )
-            self.n = 0
+            self.stop_generations()
             db.session.commit()
             if cancellation_claimed:
                 record_request_cancellation_forecast(request_id=str(self.id), cancelled_at=cancelled_at)
