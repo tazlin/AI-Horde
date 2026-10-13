@@ -496,3 +496,48 @@ def test_ledger_mode_transitions_preserve_every_concurrent_credit(concurrent_app
             user = db.session.get(User, user_id)
             assert Decimal(str(user.kudos)) == initial_balance + emitted[user_id]
         db.session.remove()
+
+
+def test_shadow_kudos_moves_for_one_user_lock_the_balance_before_its_counter(concurrent_app: object) -> None:
+    """A shadow kudos move writes the user's balance before upserting the user's stat counter.
+
+    A separate transaction stands in for a second move of the same user's kudos: it locks the user row, waits until
+    the first move is under way, then upserts the counter. Upserting the counter first, the move deadlocked with it.
+    """
+    app = concurrent_app
+    with app.app_context():  # type: ignore[attr-defined]
+        set_kudos_ledger_mode(KudosLedgerMode.SHADOW)
+        db.session.commit()
+        user_id = _new_user(Decimal("100")).id
+        db.session.commit()
+        db.session.remove()
+    errors: list[BaseException] = []
+
+    def credit() -> None:
+        db.session.get(User, user_id).modify_kudos(5, "accumulated")
+
+    with app.app_context(), db.engine.connect() as other:  # type: ignore[attr-defined]
+        other.execute(text("UPDATE users SET kudos = kudos WHERE id = :id"), {"id": user_id})
+        mover = threading.Thread(target=_run_in_app_context, args=(app, credit, errors))
+        mover.start()
+        time.sleep(1.5)
+        other.execute(
+            text(
+                "INSERT INTO user_stats (user_id, action, value) VALUES (:id, 'accumulated', 1) "
+                "ON CONFLICT (user_id, action) DO UPDATE SET value = user_stats.value + excluded.value",
+            ),
+            {"id": user_id},
+        )
+        other.commit()
+    mover.join(timeout=_JOIN_TIMEOUT_SECONDS)
+
+    assert not mover.is_alive()
+    assert errors == []
+    with app.app_context():  # type: ignore[attr-defined]
+        assert db.session.get(User, user_id).kudos == 105
+        accumulated = db.session.execute(
+            text("SELECT value FROM user_stats WHERE user_id = :id AND action = 'accumulated'"),
+            {"id": user_id},
+        ).scalar_one()
+        assert Decimal(str(accumulated)) == Decimal("6")
+        db.session.remove()

@@ -140,14 +140,21 @@ def project_user_balance(user: LegacyUser, amount: KudosAmount, action: str) -> 
     """Apply a shadow balance/stat mutation and return its floor adjustment."""
     if kudos_projection_is_async():
         return Decimal("0.00")
-    from horde.classes.base.user import UserStats
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    from horde.classes.base.user import User, UserStats
     from horde.database.kudos_counters import increment_counter
+    from horde.flask import db
 
     _refresh_after_shadow_pin(user)
     original_balance = Decimal(str(user.kudos))
     amount_decimal = Decimal(str(amount))
-    user.kudos = float((original_balance + amount_decimal).quantize(Decimal("0.01")))
-    user.kudos = max(user.kudos, user.get_min_kudos())
+    balance = max(float((original_balance + amount_decimal).quantize(Decimal("0.01"))), user.get_min_kudos())
+    # The balance is written before the counter is upserted. Left to the flush, it was written after, and two
+    # transactions moving one user's kudos each held one of the two rows while waiting for the other.
+    db.session.execute(update(User.__table__).where(User.__table__.c.id == user.id).values(kudos=balance))
+    set_committed_value(user, "kudos", balance)
     increment_counter(UserStats, {"user_id": user.id, "action": action}, amount_decimal)
     return (Decimal(str(user.kudos)) - original_balance - amount_decimal).quantize(Decimal("0.01"))
 
