@@ -111,6 +111,32 @@ UNDECLARED_STYLE_DECLARATION = "undeclared"
 """The policy label for a style that declares no ``parameter_policy``, in logs and metric attributes."""
 
 
+# User ids are 32-bit integers; a larger id names nobody.
+_MAX_USER_ID = 2**31 - 1
+
+
+def parse_priority_user_ids(priority_usernames: list[Any] | None) -> list[int]:
+    """Return the user ids named by a worker's ``priority_usernames``.
+
+    Each entry must be an ``alias#id`` string whose id is a decimal number. An id too large to belong to any user is
+    dropped, as an id naming no existing user is.
+
+    Raises:
+        e.BadRequest: An entry is not a string ending in ``#`` followed by ASCII digits.
+    """
+    user_ids: list[int] = []
+    for entry in priority_usernames or []:
+        user_id = entry.rpartition("#")[2] if isinstance(entry, str) and "#" in entry else ""
+        if not (user_id.isascii() and user_id.isdigit()):
+            raise e.BadRequest(
+                message="Priority usernames need to be provided in the form of 'alias#number'. Example: 'db0#1'",
+                rc="InvalidPriorityUsername",
+            )
+        if int(user_id) <= _MAX_USER_ID:
+            user_ids.append(int(user_id))
+    return user_ids
+
+
 def assert_submitting_key(apikey: str, wp: WaitingPrompt) -> None:
     """Refuse to expose a stored request unless ``apikey`` is the key that submitted it.
 
@@ -1038,11 +1064,7 @@ class JobPopTemplate(Resource):
         self.priority_usernames = []
         if self.args.priority_usernames:
             self.priority_usernames = self.args.priority_usernames
-            if any("#" not in user_id for user_id in self.priority_usernames):
-                raise e.BadRequest(
-                    message="Priority usernames need to be provided in the form of 'alias#number'. Example: 'db0#1'",
-                    rc="InvalidPriorityUsername",
-                )
+        pre_priority_user_ids = parse_priority_user_ids(self.priority_usernames)
         self.models = []
         if self.args.models:
             self.models = self.args.models
@@ -1066,12 +1088,6 @@ class JobPopTemplate(Resource):
         # This ensures that the priority requested by the bridge is respected
         # self.priority_users = [self.user]
         ## Start prioritize by bridge request ##
-        pre_priority_user_ids = [x.split("#")[-1] for x in self.priority_usernames]
-        if any((u == "" or not u.isdigit) for u in pre_priority_user_ids):
-            raise e.BadRequest(
-                message="Priority usernames need to be provided in the form of 'alias#number'. Example: 'db0#1'",
-                rc="InvalidPriorityUsername",
-            )
         self.priority_user_ids = [self.user.id]
         # TODO move to database class
         p_users_id_from_db = db.session.query(User.id).filter(User.id.in_(pre_priority_user_ids)).all()

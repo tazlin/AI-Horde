@@ -24,6 +24,7 @@ from horde.apis.v2.base import (
     api,
     assert_submitting_key,
     commit_request_cancellation,
+    parse_priority_user_ids,
 )
 from horde.classes.base import settings
 from horde.classes.base.style_contract import (
@@ -1399,10 +1400,7 @@ class InterrogatePop(JobPopTemplate):
         self.priority_usernames = []
         if self.args.priority_usernames:
             self.priority_usernames = self.args.priority_usernames
-            if any("#" not in user_id for user_id in self.priority_usernames):
-                raise e.BadRequest(
-                    "Priority usernames need to be provided in the form of 'alias#number'. Example: 'db0#1'",
-                )
+        pre_priority_user_ids = parse_priority_user_ids(self.priority_usernames)
         self.forms = []
         if self.args.forms:
             self.forms = self.args.forms
@@ -1418,7 +1416,6 @@ class InterrogatePop(JobPopTemplate):
         # self.priority_users = [self.user]
         ## Start prioritize by bridge request ##
 
-        pre_priority_user_ids = [x.split("#")[-1] for x in self.priority_usernames if x != ""]
         self.priority_user_ids = [self.user.id]
         # TODO move to database class
         p_users_id_from_db = db.session.query(User.id).filter(User.id.in_(pre_priority_user_ids)).all()

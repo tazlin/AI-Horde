@@ -90,8 +90,13 @@ worker's `can_generate`, which still runs on each candidate, so the query may on
 
 A worker in maintenance that receives nothing gets `403 WorkerMaintenance`.
 
+Each `priority_usernames` entry must be `alias#id` with a decimal id; any other entry refuses the pop with
+`400 InvalidPriorityUsername` (image, text and interrogation alike). Only the id is read: an id naming no user, including
+one too large to be a user id, is ignored.
+
 Tests: `TestMaintenance`, `TestTargeting`, `TestMatchedTargetingRequirement`,
-`test_a_priority_request_that_excludes_this_worker_is_not_served`.
+`test_a_priority_request_that_excludes_this_worker_is_not_served`, the priority username cases of `TestPriorityUsers`,
+`tests/unit/test_priority_usernames.py`.
 
 ### Image conditions
 

@@ -769,6 +769,67 @@ class TestPriorityUsers:
 
         assert prompt_of(worker.pop()) == "general request"
 
+    @pytest.mark.parametrize(
+        "username",
+        [
+            "someone#abc",
+            "someone#1;DROP TABLE users",
+            "someone#-1",
+            "someone# 1",
+            "someone#1.0",
+            "someone#\u0661",
+            "someone#",
+            "#",
+        ],
+    )
+    def test_a_priority_username_whose_id_is_not_a_number_is_rejected(self, client, app, owner, gentype, username):
+        worker = Worker(client, app, owner, _config(gentype))
+        worker.config.priority_usernames = [username]
+
+        resp = worker.raw_pop()
+
+        assert resp.status_code == 400, resp.get_data(as_text=True)
+        assert resp.get_json()["rc"] == "InvalidPriorityUsername"
+
+    def test_a_priority_username_that_is_not_a_string_is_rejected(self, client, app, owner, gentype):
+        worker = Worker(client, app, owner, _config(gentype))
+        worker.config.priority_usernames = [7]
+
+        resp = worker.raw_pop()
+
+        # The payload model refuses it before the pop reads it.
+        assert resp.status_code == 400, resp.get_data(as_text=True)
+
+    def test_an_id_too_large_for_any_user_is_ignored_like_an_unknown_one(self, client, app, make_api_user, owner, gentype):
+        friend = make_api_user(trusted=True, kudos=1000)
+        stranger = make_api_user(trusted=True, kudos=1000)
+        worker = Worker(client, app, owner, _config(gentype, priority_usernames=["nobody#99999999999999999999", friend.alias]))
+        request_id = _submit(client, gentype, stranger, "stranger")
+        store(app, request_id, extra_priority=10**9)
+        _submit(client, gentype, friend, "friend request")
+
+        assert prompt_of(worker.pop()) == "friend request"
+        assert prompt_of(worker.pop()) == "stranger"
+
+
+def _interrogation_pop(client, owner: ApiUser, priority_usernames: list[Any]):
+    body = {"name": f"pop-selection-alchemist-{uuid.uuid4().hex[:10]}", "forms": ["caption"], "bridge_agent": CLIENT_AGENT}
+    return client.post("/api/v2/interrogate/pop", json={**body, "priority_usernames": priority_usernames}, headers=_headers(owner.api_key))
+
+
+@pytest.mark.parametrize("username", ["someone#abc", "someone#1;DROP TABLE users", "someone#\u0661"])
+def test_the_interrogation_pop_rejects_a_priority_username_whose_id_is_not_a_number(client, owner, username):
+    resp = _interrogation_pop(client, owner, [username])
+
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    assert resp.get_json()["rc"] == "InvalidPriorityUsername"
+
+
+def test_the_interrogation_pop_ignores_an_id_too_large_for_any_user(client, owner):
+    resp = _interrogation_pop(client, owner, ["nobody#99999999999999999999"])
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
 
 # --------------------------------------------------------------------------- #
 # Maintenance and paused workers                                              #

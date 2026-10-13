@@ -697,9 +697,10 @@ _POP_PROBES: list[tuple[str, dict[str, Any], str]] = [
     ("priority:bare-hash", {"priority_usernames": ["#"]}, "400"),
     ("priority:non-numeric-id", {"priority_usernames": ["someone#abc"]}, "400"),
     ("priority:sql-id", {"priority_usernames": ["someone#1;DROP TABLE users"]}, "400"),
-    ("priority:overflowing-id", {"priority_usernames": ["someone#99999999999999999999"]}, "400|2xx"),
-    ("priority:negative-id", {"priority_usernames": ["someone#-1"]}, "400|2xx"),
-    ("priority:non-ascii-digit-id", {"priority_usernames": ["someone#١"]}, "400|2xx"),
+    # An id too large for any user names nobody, like any other unknown user.
+    ("priority:overflowing-id", {"priority_usernames": ["someone#99999999999999999999"]}, "2xx"),
+    ("priority:negative-id", {"priority_usernames": ["someone#-1"]}, "400"),
+    ("priority:non-ascii-digit-id", {"priority_usernames": ["someone#١"]}, "400"),
     ("priority:unknown-user", {"priority_usernames": ["ghost#2147483646"]}, "2xx"),
     ("priority:thousands", {"priority_usernames": [f"ghost#{2_000_000_000 + i}" for i in range(2000)]}, "2xx|400"),
     ("amount:zero", {"amount": 0}, "400"),
