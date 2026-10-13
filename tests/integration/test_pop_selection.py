@@ -16,6 +16,7 @@ image ``skipped`` report counts the whole queue.
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -1599,6 +1600,15 @@ class TestWordBlacklist:
             ("a_b", "axb testing", False),
             ("back\\slash", "a back\\slash here", True),
             ("back\\slash", "a backslash here", False),
+            # Case is compared as Python lowercases: "İ" lowercases to "i" plus a combining dot, so "istanbul" is not in
+            # "İSTANBUL", and "straße" is not "STRASSE". A non-ASCII letter in another case still matches.
+            ("istanbul", "\u0130STANBUL by night", False),
+            ("istanbul", "ISTANBUL by night", True),
+            ("i\u0307stanbul", "\u0130STANBUL by night", True),
+            ("straße", "STRASSE map", False),
+            ("straße", "STRAßE sign", True),
+            ("äpfel", "ÄPFEL pie", True),
+            ("Äpfel", "äpfel pie", True),
         ],
     )
     def test_a_blacklisted_word_refuses_the_request(self, client, app, requester, owner, word, prompt, refused):
@@ -1612,6 +1622,44 @@ class TestWordBlacklist:
             assert nonzero(job["skipped"]) == {"blacklist": 1}
         else:
             assert prompt_of(job) == prompt
+
+
+# Letters whose lowercase differs between Python and a database locale, change length, or are titlecase or ligatures.
+_CASE_EDGE_LETTERS = ["\u0130", "\u1e9e", "\u212a", "\u2126", "\u212b", "\u01c5", "\u03a3", "\ufb01", "\u13a0", "\u0149", "\u00c4"]
+
+
+def _case_edge_cases() -> list[tuple[str, str]]:
+    cases = []
+    for letter in _CASE_EDGE_LETTERS:
+        # The last two forms are what a database locale may fold the letter to: the first code point of its lowercase,
+        # and its base letter without marks.
+        forms = {
+            letter,
+            letter.lower(),
+            letter.casefold(),
+            letter.upper(),
+            letter.lower()[0],
+            unicodedata.normalize("NFKD", letter)[0].lower(),
+        }
+        for word in sorted(f"x{form}y" for form in forms):
+            cases.append((word, f"X{letter}Y in a field"))
+    return cases
+
+
+@pytest.mark.parametrize(("word", "prompt"), _case_edge_cases())
+def test_a_word_blacklist_refuses_exactly_what_the_workers_own_comparison_refuses(client, app, requester, owner, word, prompt):
+    """The worker's comparison is a substring test on Python-lowercased text, whatever the database's own case rules."""
+    refused = word.lower() in prompt.lower()
+    worker = Worker(client, app, owner, ImageWorkerConfig(blacklist=[word]))
+    submit_image(client, requester, prompt)
+
+    job = worker.pop()
+
+    if refused:
+        assert job["id"] is None
+        assert nonzero(job["skipped"]) == {"blacklist": 1}
+    else:
+        assert prompt_of(job) == prompt
 
 
 def _read_boundaries() -> list[int]:

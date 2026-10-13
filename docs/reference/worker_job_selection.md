@@ -113,11 +113,19 @@ transparency), and speed limits. It also refuses, on the worker's behalf:
 - prompts containing a word on the worker's blacklist (case-insensitive substring; `%`, `_` and `\` match only
   themselves).
 
+The blacklist comparison is `can_generate`'s: the lowercased word is a substring of the lowercased prompt, both
+lowercased by Python. The query lowercases only ASCII letters (the "C" collation), because a database locale lowercases
+some other letters differently: it folds "İ" to "i", where Python gives "i" and a combining dot, so a locale-aware
+query would refuse "İSTANBUL" to a worker blacklisting "istanbul" although `can_generate` serves it. A prompt differing
+from a word only in the case of a non-ASCII letter ("ÄPFEL" for "äpfel") passes the query and is refused, and reported
+under `blacklist`, by `can_generate`.
+
 Checks that need the model reference or payload arithmetic stay in `can_generate` only: the sampler work ceiling under
 `limit_max_steps`, baseline-dependent features, inpainting-only model rules, `require_upfront_kudos`, and per
 post-processor bridge support.
 
-Tests: `TestImageEligibility`, `TestImageEligibilityEdges`, `TestWordBlacklist`, `TestPausedWorker`.
+Tests: `TestImageEligibility`, `TestImageEligibilityEdges`, `TestWordBlacklist`,
+`test_a_word_blacklist_refuses_exactly_what_the_workers_own_comparison_refuses`, `TestPausedWorker`.
 
 ### Text conditions
 

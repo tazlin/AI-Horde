@@ -1142,12 +1142,18 @@ def _escape_like(text: str) -> str:
 
 
 def wp_matches_worker_blacklist(wp_class, worker):
-    """SQL condition: the request's prompt contains a word on the worker's blacklist, compared as ``Worker.can_generate`` does.
+    """SQL condition: the request's prompt contains a word on the worker's blacklist, and so ``Worker.can_generate``
+    would refuse it.
+
+    ``can_generate`` compares Python-lowercased text. The database lowercases differently outside ASCII (a locale folds
+    "İ" to "i" where Python gives "i̇"), so the prompt is lowercased in the "C" collation, which folds only ASCII
+    letters: whatever this matches, Python's comparison matches too. A prompt that differs from a word only in the case
+    of a non-ASCII letter is left to ``can_generate``, which refuses and reports it.
 
     The words are one array parameter, so the statement's shape does not depend on how many a worker has.
     """
     patterns = [f"%{_escape_like(blacklisted.word.lower())}%" for blacklisted in worker.blacklist]
-    return func.lower(wp_class.prompt).like(any_(literal(patterns, ARRAY(Text))))
+    return func.lower(wp_class.prompt.collate("C")).like(any_(literal(patterns, ARRAY(Text))))
 
 
 def wp_tricks_worker(wp_class, worker):
