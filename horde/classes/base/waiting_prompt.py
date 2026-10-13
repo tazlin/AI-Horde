@@ -549,7 +549,6 @@ class WaitingPrompt(db.Model):
         safe_amount = current_n - remaining_n
         could_be_first_assignment = current_n == self.jobs
         payload = self.get_job_payload(current_n)
-        db.session.commit()
         procgen_class = procgen_classes[self.wp_type]
         gens_list = []
         dispatch_batch_id = uuid.uuid4()
@@ -559,11 +558,13 @@ class WaitingPrompt(db.Model):
         while safe_amount >= 1:
             safe_amount -= 1
             current_n -= 1
+            # The jobs commit with the claim below, so no reader sees the claimed generations spent without them.
             new_gen = procgen_class(
                 wp_id=self.id,
                 worker_id=worker.id,
                 model=model,
                 dispatch_batch_id=dispatch_batch_id,
+                commit=False,
             )
             logger.info(
                 f"Procgen with ID {new_gen.id} popped from WP {self.id} by worker {worker.id} "
@@ -572,6 +573,7 @@ class WaitingPrompt(db.Model):
             gens_list.append(new_gen)
             if self.faulted:
                 break
+        db.session.commit()
         if gen_span is not None:
             gen_span.set_attribute("horde.procgens_created", len(gens_list))
         if gens_list:

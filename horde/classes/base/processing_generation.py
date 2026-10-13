@@ -150,10 +150,16 @@ class ProcessingGeneration(db.Model):
     worker_id = db.Column(uuid_column_type(), db.ForeignKey("workers.id"), nullable=False)
     created = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, commit: bool = True, **kwargs):
+        """Create and persist a job.
+
+        Args:
+            commit: Commit the job on its own. A pop passes False to commit its jobs together with the claim that
+                created them, so no committed state has the claim's generations spent without their jobs.
+        """
         super().__init__(*args, **kwargs)
         db.session.add(self)
-        db.session.commit()
+        self._persist(commit)
         if kwargs.get("model") is None:
             # Callers on the pop path pass an explicit model selected against the
             # worker's declared list. This branch serves the remaining callers
@@ -193,7 +199,14 @@ class ProcessingGeneration(db.Model):
         else:
             self.model = kwargs["model"]
         self.set_job_ttl()
-        db.session.commit()
+        self._persist(commit)
+
+    @staticmethod
+    def _persist(commit: bool) -> None:
+        if commit:
+            db.session.commit()
+        else:
+            db.session.flush()
 
     def set_generation(self, generation: str, things_per_sec: float, **kwargs: object) -> float | int:
         from horde.metrics import (

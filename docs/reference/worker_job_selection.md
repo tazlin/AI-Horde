@@ -148,11 +148,16 @@ The pop claims the first candidate the worker can serve with one statement that 
 A claim that finds `n = 0` or a faulted request hands out nothing, and the pop evaluates the next candidate. No request
 is handed out more often than it asked for, and no worker is turned away while servable work remains.
 
+The claim commits together with the jobs it creates. Every generation a request asked for is at all times exactly one
+of: still needed (`n`), out with a worker, or delivered; a reader never sees generations taken that no job carries,
+which a status read would report as done.
+
 A generation given back (a faulted submission, a timed-out job) increments `n` in the database
 (`return_generation`), so it is not lost to, and does not overwrite, a concurrent claim.
 
 Tests: `TestBatching`, `test_an_image_worker_takes_fewer_large_images_than_its_amount`, `TestClaimAfterRead`,
-`TestConcurrentPops`, `TestReturnedGenerations`, `TestReturnedGenerationsDuringClaims`.
+`TestConcurrentPops`, `TestReturnedGenerations`, `TestReturnedGenerationsDuringClaims`,
+`test_no_committed_state_has_a_claim_spent_without_its_jobs`.
 
 ## What a worker is told
 

@@ -1460,6 +1460,70 @@ class TestClaimAfterRead:
         assert read_request(app, request_id)["n"] == 1
 
 
+def submit_job(client, gentype: str, owner: ApiUser, job_id: str, state: str = "ok"):
+    """Submit one job as its worker does, returning the response."""
+    url = "/api/v2/generate/text/submit" if gentype == "text" else "/api/v2/generate/submit"
+    body: dict[str, Any] = {"id": job_id, "generation": "R2" if gentype == "image" else "a story", "state": state}
+    if gentype == "image":
+        body["seed"] = 0
+    return client.post(url, json=body, headers=_headers(owner.api_key))
+
+
+def committed_accounting(app, request_id: str) -> dict[str, int]:
+    """Read, in a separate transaction, what is committed for a request: what it still needs, what is out, what came back.
+
+    Every generation a request asked for is at all times exactly one of: still needed (``n``), out with a worker
+    (``processing``), or delivered. Faulted jobs gave their generation back to ``n``.
+    """
+    from sqlalchemy import text
+
+    from horde.flask import db
+
+    with app.app_context(), db.engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT wp.n, wp.jobs, "
+                "count(pg.id) FILTER (WHERE NOT pg.fake AND NOT pg.faulted AND pg.generation IS NULL) AS processing, "
+                "count(pg.id) FILTER (WHERE NOT pg.fake AND NOT pg.faulted AND pg.generation IS NOT NULL) AS delivered "
+                "FROM waiting_prompts wp LEFT JOIN processing_gens pg ON pg.wp_id = wp.id WHERE wp.id = :id GROUP BY wp.id",
+            ),
+            {"id": request_id},
+        ).one()
+    return {"n": row.n, "jobs": row.jobs, "processing": row.processing, "delivered": row.delivered}
+
+
+@pytest.mark.parametrize("gentype", GENTYPES)
+def test_no_committed_state_has_a_claim_spent_without_its_jobs(client, app, requester, owner, monkeypatch, gentype):
+    """A claim and the jobs it creates commit together: a reader never sees generations taken that no job carries.
+
+    In between, a request whose earlier job faulted and was given back looked done to its status read, and a delivery
+    landing there could mark it completed while its last job was still to be created.
+    """
+    from horde.classes.base.waiting_prompt import WaitingPrompt
+
+    worker = Worker(client, app, owner, _config(gentype, amount=2))
+    request_id = _submit(client, gentype, requester, "claimed in one step", params={"n": 2})
+    first, second = worker.pop()["ids"]
+    assert submit_job(client, gentype, owner, first, "faulted").status_code == 200
+    assert submit_job(client, gentype, owner, second).status_code == 200
+    seen: list[dict[str, int]] = []
+    select_model = WaitingPrompt._select_model
+
+    def read_while_claiming(self, *args, **kwargs):
+        seen.append(committed_accounting(app, request_id))
+        return select_model(self, *args, **kwargs)
+
+    monkeypatch.setattr(WaitingPrompt, "_select_model", read_while_claiming)
+
+    job = worker.pop()
+
+    assert prompt_of(job) == "claimed in one step"
+    assert len(seen) == 1
+    assert seen[0]["n"] + seen[0]["processing"] + seen[0]["delivered"] == seen[0]["jobs"] == 2, seen[0]
+    after = committed_accounting(app, request_id)
+    assert (after["n"], after["processing"], after["delivered"]) == (0, 1, 1)
+
+
 def _claim_one_elsewhere(app, request_id: str) -> None:
     """Take one generation of a request in a separate transaction, as a concurrent pop's claim does."""
     from sqlalchemy import text
