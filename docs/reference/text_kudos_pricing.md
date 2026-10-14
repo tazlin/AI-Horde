@@ -213,6 +213,7 @@ no quote computed under the previous tariff is reused during the two-day TTL.
 | Backend validation | `horde/bridge_reference.py` | `is_backed_validated`, `LLM_VALIDATED_BACKENDS` |
 | Context-fit estimate (not pricing) | `horde/classes/kobold/request_fit.py` | `estimate_prompt_tokens` |
 | Calibration | `tools/text_tariff_bench.py` | `fit_costs`, `derive_rates` |
+| Per-job telemetry | `horde/classes/kobold/genstats.py` | `TextGenerationStatistic.prompt_length`, `generation_length`, `record_text_statistic` |
 
 ## Regression-test map
 
@@ -230,6 +231,14 @@ no quote computed under the previous tariff is reused during the two-day TTL.
 | Grown context quoted in full; styled and unstyled quotes agree on the resolved prompt | `tests/integration/test_text_style_application.py` |
 | Longer prompt settles higher for the same generation | `tests/integration/test_text.py` |
 | Calibration fits and rate derivation | `tests/unit/test_text_tariff_bench.py` |
+
+## Telemetry
+
+Every submission writes a `text_gen_stats` row through `record_text_statistic` with the model, the
+bridge, `max_length`, `max_context_length`, `prompt_length` and `generation_length` in characters, the
+pop time as `created` and the submit time as `finished`. `generation_length` is null for a job that
+returned nothing and for rows written before `sql_statements/5.1.14.txt` added the column. Together the
+columns let prompt-processing and generation cost be regressed from live traffic, server-measured.
 
 ## Sharp edges
 

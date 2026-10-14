@@ -128,3 +128,41 @@ class TestStatisticStyle:
         db.session.commit()
 
         assert self._newest_statistic_style(procgen) is None
+
+
+class TestStatisticGenerationLength:
+    """The statistic records how much text came back, so prompt and output cost can be told apart in live data."""
+
+    @staticmethod
+    def _newest_statistic(procgen: TextProcessingGeneration) -> TextGenerationStatistic:
+        record_text_statistic(procgen)
+        return db.session.query(TextGenerationStatistic).order_by(TextGenerationStatistic.id.desc()).first()
+
+    def test_a_completed_generation_records_the_returned_length_beside_the_prompt_length(self, fake_redis, make_user) -> None:
+        user = make_user()
+        wp = _make_text_wp(user)
+        procgen = TextProcessingGeneration(wp_id=wp.id, worker_id=_make_text_worker(user).id, model=_MODEL)
+        procgen.generation = "a reply of some length"
+        db.session.commit()
+
+        newest = self._newest_statistic(procgen)
+
+        assert newest.prompt_length == len("a unit-test text prompt")
+        assert newest.generation_length == len("a reply of some length")
+
+    def test_an_empty_return_records_zero_not_null(self, fake_redis, make_user) -> None:
+        user = make_user()
+        wp = _make_text_wp(user)
+        procgen = TextProcessingGeneration(wp_id=wp.id, worker_id=_make_text_worker(user).id, model=_MODEL)
+        procgen.generation = ""
+        db.session.commit()
+
+        assert self._newest_statistic(procgen).generation_length == 0
+
+    def test_a_job_that_returned_nothing_records_null(self, fake_redis, make_user) -> None:
+        user = make_user()
+        wp = _make_text_wp(user)
+        procgen = TextProcessingGeneration(wp_id=wp.id, worker_id=_make_text_worker(user).id, model=_MODEL)
+        db.session.commit()
+
+        assert self._newest_statistic(procgen).generation_length is None

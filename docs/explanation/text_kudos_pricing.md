@@ -124,6 +124,14 @@ pay more than a GPU measurement would set, and the free-tier budget, which is th
 prompt with 512 tokens of output, is used up by prompt processing alone at about 7,000 tokens, so a
 kudos-less requester with a longer prompt is refused rather than downgraded.
 
+A second calibration path needs no benchmark hardware at all. Every text submission writes a
+`text_gen_stats` row with the prompt length, the returned length, and the pop and submit times, all
+measured by the server. A regression of pop-to-submit time on prompt length and returned length, per
+model size and bridge, estimates the prefill and decode rates from live traffic without trusting any
+worker's report of its own effort. The fit is noisier than a benchmark, since a worker's local queue
+and the network are inside the elapsed time, but it averages over the hardware that actually serves
+the Horde rather than one machine.
+
 ## What the design buys and what it costs
 
 The additive form pays the prompt once, pays each generated token by the context it was generated over,

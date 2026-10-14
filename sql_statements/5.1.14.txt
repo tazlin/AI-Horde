@@ -1,14 +1,18 @@
--- Run with psql in its default autocommit mode. Do not pass --single-transaction:
--- CREATE INDEX CONCURRENTLY cannot run inside a transaction block. Pass
--- -v ON_ERROR_STOP=1 so a failure stops the migration. A failed concurrent build
--- leaves an INVALID index; drop it and rerun after correcting the cause.
+-- Run with psql in its default autocommit mode. Pass -v ON_ERROR_STOP=1 so a
+-- failure stops the migration.
 --
--- Moderators browse the evidence of one reason newest-first:
---   SELECT ... FROM prompt_moderation_events WHERE reason IN (...) ORDER BY id DESC LIMIT ?
--- Without an index the descending id scan walks every event of the common
--- reasons to fill a page of a rare one. The application filters by reason with
--- or without the index, so this can be applied before or after deploying 5.1.14.
+-- The length of the text a worker returned, recorded beside the prompt length
+-- the statistic already carries. With the created and finished times this lets
+-- the cost of prompt processing and of generation be regressed from live
+-- traffic, server-measured, for the text tariff's rates. Nullable with no
+-- default, so this is a catalogue-only change in PostgreSQL: no table rewrite,
+-- and only a brief AccessExclusiveLock. An older application version ignores
+-- the column, so this migration can be applied before the code that writes it
+-- is deployed. Rows from before the migration keep a null.
 SET lock_timeout = '3s';
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_prompt_moderation_reason_id
-  ON prompt_moderation_events (reason, id);
+ALTER TABLE text_gen_stats
+  ADD COLUMN IF NOT EXISTS generation_length INTEGER NULL;
+
+COMMENT ON COLUMN text_gen_stats.generation_length IS
+  'Characters the worker returned. Null for a job that returned nothing, and for rows written before the column existed.';

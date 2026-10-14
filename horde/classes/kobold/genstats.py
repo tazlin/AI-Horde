@@ -38,6 +38,7 @@ def record_text_statistic(procgen):
         max_context_length=procgen.wp.max_context_length,
         softprompt=procgen.wp.softprompt,
         prompt_length=len(procgen.wp.prompt),
+        generation_length=len(procgen.generation) if procgen.generation is not None else None,
         bridge_agent=procgen.worker.bridge_agent,
         client_agent=procgen.wp.client_agent,
         style_id=procgen.wp.style_id,
@@ -65,6 +66,9 @@ class TextGenerationStatistic(db.Model):
     max_context_length = db.Column(db.Integer, nullable=False)
     softprompt = db.Column(db.Integer, nullable=True)
     prompt_length = db.Column(db.Integer, nullable=False)
+    # Characters the worker returned; null for a job that returned nothing. With prompt_length and
+    # the created and finished times, it lets prompt and output cost be regressed from live traffic.
+    generation_length = db.Column(db.Integer, nullable=True)
     client_agent = db.Column(db.Text, default="unknown:0:unknown", nullable=False, index=True)
     bridge_agent = db.Column(db.Text, default="unknown:0:unknown", nullable=False, index=True)
     state = db.Column(Enum(ImageGenState), default=ImageGenState.OK, nullable=False, index=True)
