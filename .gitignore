@@ -161,3 +161,6 @@ locust.conf
 
 # Local design-scratch area for in-progress design notes; never committed.
 docs/design/
+
+# Model reference cache written by horde_model_reference when the live reference is loaded (e.g. by the integration tests).
+models/horde_model_reference/
