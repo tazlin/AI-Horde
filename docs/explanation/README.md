@@ -19,4 +19,5 @@ consequences, is recorded instead in [Decisions](../decisions/index.md).
 | --- | --- |
 | [Kudos accounting, projection, and concurrency](kudos_accounting.md) | Why kudos movements are recorded as typed events, how the projector materializes them, and how spends stay safe while balances lag. |
 | [Request feasibility and queue pressure](request_feasibility_and_queue_pressure.md) | Practical guidance for using request progress, worker compatibility, capacity counts, queue estimates, and stall warnings in API clients. |
+| [Why text jobs are priced this way](text_kudos_pricing.md) | What a text worker spends on a job, what the server can and cannot see of it, the measurements behind the tariff's shape and rates, and what those measurements do not establish. |
 <!-- END GENERATED: documents -->

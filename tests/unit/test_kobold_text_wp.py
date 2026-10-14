@@ -14,11 +14,11 @@ keeps the test hermetic and fast while still locking the real arithmetic.
 
 from __future__ import annotations
 
-import math
 from types import MethodType, SimpleNamespace
 
 import pytest
 
+from horde.classes.kobold.pricing import WORK_UNIT_SCALE
 from horde.classes.kobold.waiting_prompt import TextWaitingPrompt
 
 
@@ -94,9 +94,9 @@ class TestKudos:
         assert TextWaitingPrompt.calculate_extra_kudos_burn(SimpleNamespace(), 10) == 11
 
     def test_calculate_kudos_empty_model_list_uses_13b_assumption(self):
-        # context_multiplier at the 20-token floor = 1.2 + 2.2**log2(20/1024)
-        # round(80 * 13 / 125 * 1.21137, 2) = 10.08
-        assert TextWaitingPrompt.calculate_kudos(_wp(max_length=80)) == 10.08
+        # No prompt: 80 generated tokens at an empty context are 80 work units, scaled by 1.33527 to the
+        # legacy level and priced as 13B: round(80 * 1.33527 * 13 / 125, 2) = 11.11
+        assert TextWaitingPrompt.calculate_kudos(_wp(max_length=80)) == 11.11
 
     def test_calculate_kudos_matched_targeting_env_floors_to_min(self, monkeypatch):
         monkeypatch.setenv("HORDE_REQUIRE_MATCHED_TARGETING", "1")
@@ -122,8 +122,7 @@ class TestCalculateKudos:
 
         kudos = TextWaitingPrompt.calculate_kudos(wp)
 
-        context_multiplier = 1.2 + (2.2 ** math.log2(20 / 1024))
-        assert kudos == pytest.approx(100 * (2.7 / 100) * context_multiplier)
+        assert kudos == pytest.approx(100 * WORK_UNIT_SCALE * (2.7 / 100))
         assert wp.kudos == kudos
 
     def test_the_prompt_sets_the_quote_and_a_context_it_fits_does_not(self):
@@ -131,13 +130,13 @@ class TestCalculateKudos:
         long = _wp(max_length=512, max_context_length=16384, prompt="x" * 40_000, models=(SimpleNamespace(model="a-13B"),))
 
         assert TextWaitingPrompt.calculate_kudos(short) == 117.15
-        assert TextWaitingPrompt.calculate_kudos(long) == 775.26
+        assert TextWaitingPrompt.calculate_kudos(long) == 765.07
 
     def test_a_prompt_the_context_truncates_is_quoted_at_what_the_worker_keeps(self):
         # 10,000 tokens into a 2,048 context beside 512 of output: 1,536 tokens are processed and quoted.
         truncated = _wp(max_length=512, max_context_length=2048, prompt="x" * 40_000, models=(SimpleNamespace(model="a-13B"),))
 
-        assert TextWaitingPrompt.calculate_kudos(truncated) == 148.35
+        assert TextWaitingPrompt.calculate_kudos(truncated) == 142.31
 
     def test_the_quote_matches_settlement_for_the_same_operands(self):
         from horde.classes.kobold.pricing import calculate_text_generation_reward
@@ -177,30 +176,39 @@ class TestRequireUpfrontKudosForLongPrompts:
         assert result == (False, 512, False)
 
     def test_a_long_prompt_within_the_output_allowance_requires_upfront(self):
-        # 50,000 estimated tokens: floor(512 * M(4096) / 30) = 103.
+        # 5,000 estimated tokens leave 319 of the 512-token budget's work for generation.
         result = TextWaitingPrompt.require_upfront_kudos(
-            _wp(max_length=512, prompt="x" * (50_000 * 4)),
+            _wp(max_length=512, prompt="x" * (5_000 * 4)),
             {"queued_text_requests": 0},
             0,
         )
-        assert result == (True, 103, False)
+        assert result == (True, 319, False)
 
     def test_a_long_prompt_with_a_small_output_stays_free(self):
         result = TextWaitingPrompt.require_upfront_kudos(
-            _wp(max_length=100, prompt="x" * (50_000 * 4)),
+            _wp(max_length=100, prompt="x" * (5_000 * 4)),
             {"queued_text_requests": 0},
             0,
         )
-        assert result == (False, 103, False)
+        assert result == (False, 319, False)
 
     def test_queue_pressure_and_the_prompt_compound(self):
-        # queue=300 -> 256 floor; floor(256 * M(4096) / 30) = 51.
+        # queue=300 -> 256 floor; a 5,000-token prompt leaves 89 of that budget.
         result = TextWaitingPrompt.require_upfront_kudos(
-            _wp(max_length=60, prompt="x" * (50_000 * 4)),
+            _wp(max_length=100, prompt="x" * (5_000 * 4)),
             {"queued_text_requests": 300},
             0,
         )
-        assert result == (True, 51, False)
+        assert result == (True, 89, False)
+
+    def test_a_prompt_whose_processing_exceeds_the_budget_cannot_be_downgraded_into_the_free_tier(self):
+        # 50,000 estimated tokens: no output allowance at all, and the third entry forbids a downgrade.
+        result = TextWaitingPrompt.require_upfront_kudos(
+            _wp(max_length=16, prompt="x" * (50_000 * 4)),
+            {"queued_text_requests": 0},
+            0,
+        )
+        assert result == (True, 0, True)
 
     def test_a_prompt_the_context_truncates_is_gated_on_what_the_worker_processes(self):
         # 50,000 estimated tokens into a 2,048 context: the worker keeps 1,536, under the reference.

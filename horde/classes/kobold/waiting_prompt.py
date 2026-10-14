@@ -151,7 +151,9 @@ class TextWaitingPrompt(WaitingPrompt):
         past the reference size, so that the modelled work of a free request stays within what the
         allowance buys at the reference prompt. The prompt is measured as the worker will process it,
         capped at what the requested context keeps beside the allowance, so a downgrade to the returned
-        allowance clears both the output and the prompt trigger in one pass.
+        allowance clears both the output and the prompt trigger in one pass. An allowance of zero means
+        the prompt's own processing already exceeds the budget, and the third entry then forbids
+        downgrading.
         """
         queue = counted_totals["queued_text_requests"]
         max_tokens = 512 + (total_threads * 5) - round(queue * 0.9)
@@ -168,6 +170,9 @@ class TextWaitingPrompt(WaitingPrompt):
             reference_prompt_tokens=reference_prompt_tokens(),
             max_context_length=self.max_context_length,
         )
+        if max_tokens == 0:
+            # The prompt alone exceeds the free budget: generating less cannot make this request free.
+            return (True, 0, True)
         if self.max_length > max_tokens:
             return (True, max_tokens, False)
         if os.getenv("HORDE_UPFRONT_KUDOS_ON_WORKERLIST", "0") == "1" and len(self.workers) > 0:

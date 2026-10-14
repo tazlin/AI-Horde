@@ -66,7 +66,7 @@ def _procgen(
 class TestGetGenKudos:
     @pytest.mark.parametrize(
         ("prompt_tokens", "expected"),
-        [(1024, 117.15), (10_000, 775.26), (50_000, 1597.44)],
+        [(1024, 117.15), (10_000, 765.07), (50_000, 1492.79)],
     )
     def test_the_prompt_sent_sets_the_price_for_the_same_returned_text(self, prompt_tokens: int, expected: float):
         assert _procgen(prompt_tokens=prompt_tokens).get_gen_kudos() == expected
@@ -74,28 +74,33 @@ class TestGetGenKudos:
     def test_the_requested_allowance_does_not_change_the_prompt_operand_while_the_prompt_fits(self):
         # 2048 returned characters count as 512 tokens under either allowance, so the only thing a
         # larger allowance could change is the prompt measurement, and it must not.
-        assert _procgen(prompt_tokens=10_000, max_length=512).get_gen_kudos() == 775.26
-        assert _procgen(prompt_tokens=10_000, max_length=1024).get_gen_kudos() == 775.26
+        assert _procgen(prompt_tokens=10_000, max_length=512).get_gen_kudos() == 765.07
+        assert _procgen(prompt_tokens=10_000, max_length=1024).get_gen_kudos() == 765.07
 
     def test_the_requested_context_does_not_change_the_price_while_the_prompt_fits(self):
-        assert _procgen(prompt_tokens=10_000, max_context_length=16384).get_gen_kudos() == 775.26
-        assert _procgen(prompt_tokens=10_000, max_context_length=98_304).get_gen_kudos() == 775.26
+        assert _procgen(prompt_tokens=10_000, max_context_length=16384).get_gen_kudos() == 765.07
+        assert _procgen(prompt_tokens=10_000, max_context_length=98_304).get_gen_kudos() == 765.07
 
     def test_a_prompt_the_context_truncates_is_priced_at_what_the_worker_keeps(self):
         # 10,000 tokens into a 2,048 context beside 512 of output: the worker keeps the last 1,536.
-        assert _procgen(prompt_tokens=10_000, max_context_length=2048, max_length=512).get_gen_kudos() == 148.35
-        assert _procgen(prompt_tokens=1536, max_context_length=65_536, max_length=512).get_gen_kudos() == 148.35
+        assert _procgen(prompt_tokens=10_000, max_context_length=2048, max_length=512).get_gen_kudos() == 142.31
+        assert _procgen(prompt_tokens=1536, max_context_length=65_536, max_length=512).get_gen_kudos() == 142.31
 
     def test_an_allowance_past_four_fifths_of_the_context_still_leaves_the_prompt_a_fifth(self):
         # The backend lowers max_length rather than keep fewer than 410 of 2,048 tokens for the prompt.
-        assert _procgen(prompt_tokens=10_000, max_context_length=2048, max_length=4096).get_gen_kudos() == 82.70
+        assert _procgen(prompt_tokens=10_000, max_context_length=2048, max_length=4096).get_gen_kudos() == 88.85
 
     def test_the_returned_text_is_still_capped_by_the_allowance(self):
         assert _procgen(prompt_tokens=1024, generation="x" * 8192, max_length=512).get_gen_kudos() == 117.15
 
-    def test_an_empty_return_pays_the_output_floor(self):
-        # 20 tokens * 13 / 125 * 30, the exposure the empty-generation counter observes.
-        assert _procgen(prompt_tokens=50_000, generation="").get_gen_kudos() == 62.40
+    def test_an_empty_return_pays_the_output_floor_over_the_context_and_no_prompt_term(self):
+        # Whitespace counts as empty too: 20 floor tokens at the 16K ceiling's context rate, prompt withheld.
+        assert _procgen(prompt_tokens=50_000, generation="").get_gen_kudos() == 14.25
+        assert _procgen(prompt_tokens=50_000, generation="  \n ").get_gen_kudos() == 14.25
+
+    def test_a_one_word_return_is_paid_the_prompt_term(self):
+        # The same floor of 20 tokens, now with the 16K-ceiling prompt processing paid.
+        assert _procgen(prompt_tokens=50_000, generation="ok").get_gen_kudos() > 1_000
 
     def test_no_generation_pays_nothing_on_a_known_model(self):
         # The cancellation path prices before anything was returned.
@@ -113,7 +118,7 @@ class TestGetGenKudos:
     def test_matched_targeting_overrides_everything(self, monkeypatch):
         monkeypatch.setenv("HORDE_REQUIRE_MATCHED_TARGETING", "1")
         assert _procgen(prompt_tokens=50_000, workers=("w",)).get_gen_kudos() == 0.1
-        assert _procgen(prompt_tokens=50_000).get_gen_kudos() == 1597.44
+        assert _procgen(prompt_tokens=50_000).get_gen_kudos() == 1492.79
 
 
 class TestGetThingsCount:

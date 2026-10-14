@@ -113,8 +113,11 @@ class TextProcessingGeneration(ProcessingGeneration):
         """
         known_model = model_reference.is_known_text_model(self.model)
         model_multiplier = model_reference.get_text_model_multiplier(self.model) if known_model else None
+        # A cancelled job has no submission and no output operand; an empty submission has the
+        # output floor but forfeits the prompt term.
+        output_tokens = None if self.generation is None else self.get_things_count()
         return calculate_text_generation_reward(
-            output_tokens=self.get_things_count(),
+            output_tokens=output_tokens,
             prompt_tokens=billing_prompt_tokens(
                 self.wp.prompt,
                 max_context_length=self.wp.max_context_length,
@@ -124,6 +127,7 @@ class TextProcessingGeneration(ProcessingGeneration):
             owner_trusted=self.worker.user.trusted,
             backend_validated=is_backed_validated(self.worker.bridge_agent),
             matched_targeting=matched_targeting_applies(len(self.wp.workers)),
+            empty_output=self.generation is not None and is_empty_text_generation(self.generation),
         )
 
     def log_aborted_generation(self):

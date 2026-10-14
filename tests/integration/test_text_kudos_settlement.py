@@ -28,6 +28,8 @@ TEST_MODELS = ["elinas/chronos-70b-v2"]
 SHORT_PROMPT = "a horde of cute stable robots repairing a mainframe"
 LONG_PROMPT = ("The maintenance log of the mainframe, entry by entry, as the robots recorded it. ") * 600
 """About 48,000 characters, estimated at 12,000 tokens, well past the 4,096-token free-tier reference."""
+MEDIUM_PROMPT = ("The maintenance log of the mainframe, entry by entry, as the robots recorded it. ") * 250
+"""About 20,000 characters, estimated at 5,000 tokens: past the reference, with some free budget left."""
 
 
 def _headers(api_key: str, client_agent: str) -> dict[str, str]:
@@ -127,13 +129,20 @@ class TestQuoteHoldAndDryRunAgree:
     ) -> None:
         poor = make_api_user(trusted=True, kudos=5)
         settle_kudos()
+        headers = _headers(poor.api_key, request_headers["Client-Agent"])
 
-        refused = _post(client, _headers(poor.api_key, request_headers["Client-Agent"]), prompt=LONG_PROMPT, max_length=512)
-
-        message = refused.get_json()["message"]
-        assert f"prompt of about {math.ceil(len(LONG_PROMPT) / 4)} tokens" in message
+        # About 5,000 tokens: part of the free budget is left for generation, and the refusal says how much.
+        partly_free = _post(client, headers, prompt=MEDIUM_PROMPT, max_length=512)
+        assert partly_free.status_code == 403, partly_free.get_data(as_text=True)
+        message = partly_free.get_json()["message"]
+        assert f"prompt of about {math.ceil(len(MEDIUM_PROMPT) / 4)} tokens" in message
         allowance = int(re.search(r"at most (\d+) tokens", message).group(1))
         assert 16 <= allowance < 512
+
+        # About 12,000 tokens: processing the prompt alone exceeds the budget, so no output would make it free.
+        never_free = _post(client, headers, prompt=LONG_PROMPT, max_length=16, allow_downgrade=True)
+        assert never_free.status_code == 403, never_free.get_data(as_text=True)
+        assert "however little is generated" in never_free.get_json()["message"]
 
     def test_a_request_that_can_be_covered_takes_a_hold_of_the_required_amount(
         self,

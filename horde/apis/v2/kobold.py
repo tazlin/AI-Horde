@@ -206,12 +206,20 @@ class TextAsyncGenerate(GenerateTemplate):
                         )
                     else:
                         prompt_clause = f"a prompt of about {prompt_tokens} tokens"
+                    if tokens == 0:
+                        allowance_clause = (
+                            f"Due to heavy demand, {prompt_clause} takes more work to process "
+                            "than may be done without the client already having the required kudos, however little is generated."
+                        )
+                    else:
+                        allowance_clause = (
+                            f"Due to heavy demand, a request with {prompt_clause} "
+                            f"may generate at most {tokens} tokens unless the client already has the required kudos."
+                        )
                     raise e.KudosUpfront(
                         required_kudos,
                         self.username,
-                        message=f"Due to heavy demand, a request with {prompt_clause} "
-                        f"may generate at most {tokens} tokens unless the client already has the required kudos. "
-                        f"This request requires {required_kudos} kudos to fulfil.",
+                        message=f"{allowance_clause} This request requires {required_kudos} kudos to fulfil.",
                     )
 
         if self.sharedkey:
