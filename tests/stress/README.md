@@ -478,6 +478,23 @@ produce meaningfully. Run them as described above. If they are added to CI later
 run the analyzer as a non-gating step and keep the run directory as an uploaded
 artifact.
 
+## Text pricing scenarios
+
+`TextRequester` carries three tasks tagged `pricing` that exercise the text tariff under load
+(`locustsuite/users/text.py`):
+
+| Task | Request | Expected outcomes |
+| --- | --- | --- |
+| `text_dry_run_prices_the_prompt` | Two dry runs with the same params, a 100-token and a 12,000-token prompt | Both quoted, and the long prompt quoted higher; a quote that is not is a failure |
+| `text_async_medium_prompt_downgrades` | A 5,000-token prompt asking for 512 tokens with `allow_downgrade` | Queued, downgraded or held depending on the requester's kudos, or refused with `KudosUpfront` |
+| `text_async_long_prompt_needs_kudos` | A 12,000-token prompt asking for 16 tokens with `allow_downgrade` | Queued with a hold, or refused: prompt processing alone exceeds the free budget, so no output makes it free |
+
+A `KudosUpfront` refusal is recorded under the request's `[expected]` name, since whether a bootstrapped
+requester has kudos on hand depends on the deployment. Any other 4xx or a 5xx is a failure.
+`TextWorkerSimulator` submits an empty generation for about one submission in twenty, so the
+empty-output branch of the tariff (paid the output floor, not the prompt) is settled under load. Select
+the scenarios alone with `--tags pricing worker`.
+
 ## Moderation evidence scenario
 
 `locustfile_moderation.py` exercises the evidence path: capture of rejected
