@@ -171,6 +171,10 @@ class TextAsyncGenerate(GenerateTemplate):
         # requested model and the prompt as the worker will process it, plus the per-job burn.
         required_kudos = round(self.wp.calculate_extra_kudos_burn(self.wp.kudos) * self.wp.n, 2)
         needs_kudos, tokens, disable_downgrade = self.wp.require_upfront_kudos(database.retrieve_totals(), total_threads)
+        if self.args.dry_run:
+            # A quote queues nothing, so it takes no hold and is never refused for lack of kudos; it
+            # prices the request as asked, without the downgrade a real submission might get.
+            return
         if self.sharedkey and self.sharedkey.kudos != -1 and required_kudos > self.sharedkey.kudos:
             if self.args.allow_downgrade and not disable_downgrade:
                 self.downgrade_wp_priority = True

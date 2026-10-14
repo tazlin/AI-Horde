@@ -144,6 +144,35 @@ class TestQuoteHoldAndDryRunAgree:
         assert never_free.status_code == 403, never_free.get_data(as_text=True)
         assert "however little is generated" in never_free.get_json()["message"]
 
+    def test_a_dry_run_needs_no_kudos_and_takes_no_hold(
+        self,
+        app: Flask,
+        client: FlaskClient,
+        make_api_user: MakeApiUser,
+        request_headers: dict[str, str],
+        settle_kudos: Callable[[], int],
+    ) -> None:
+        """A quote queues nothing: a requester who could not cover the hold still gets the same quote."""
+        from horde.classes.base.kudos import KudosReservation
+        from horde.flask import db
+
+        agent = request_headers["Client-Agent"]
+        rich = make_api_user(trusted=True, kudos=1_000_000)
+        poor = make_api_user(trusted=True, kudos=5)
+        poor_balance_before = _balance(app, settle_kudos, poor.id)
+
+        rich_quote = _post(client, _headers(rich.api_key, agent), prompt=LONG_PROMPT, max_length=512, dry_run=True)
+        poor_quote = _post(client, _headers(poor.api_key, agent), prompt=LONG_PROMPT, max_length=512, dry_run=True)
+
+        assert rich_quote.status_code == 200, rich_quote.get_data(as_text=True)
+        assert poor_quote.status_code == 200, poor_quote.get_data(as_text=True)
+        assert poor_quote.get_json()["kudos"] == rich_quote.get_json()["kudos"]
+        assert poor_quote.get_json()["resolved"]["params"]["max_length"] == 512
+        with app.app_context():
+            active_holds = db.session.query(KudosReservation).filter_by(user_id=poor.id, released_at=None).count()
+            assert active_holds == 0
+        assert _balance(app, settle_kudos, poor.id) == poor_balance_before
+
     def test_a_request_that_can_be_covered_takes_a_hold_of_the_required_amount(
         self,
         app: Flask,
