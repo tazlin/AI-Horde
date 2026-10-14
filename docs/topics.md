@@ -51,6 +51,7 @@ procedure for one subject sit together.
 - Explanation: [Kudos accounting, projection, and concurrency](explanation/kudos_accounting.md)
 - How-to: [Kudos ledger operations](how-to/kudos_ledger_operations.md)
 - How-to: [Add an image baseline](how-to/add_image_baseline.md)
+- How-to: [Calibrate the text tariff against a worker](how-to/calibrate_text_tariff.md)
 - Reference: [Kudos accounting reference](reference/kudos_accounting.md)
 - Reference: [Image baseline policy reference](reference/baseline_policy.md)
 - Reference: [Text kudos pricing reference](reference/text_kudos_pricing.md)
@@ -79,6 +80,7 @@ procedure for one subject sit together.
 
 - Explanation: [Request feasibility and queue pressure](explanation/request_feasibility_and_queue_pressure.md)
 - How-to: [Add an image baseline](how-to/add_image_baseline.md)
+- How-to: [Calibrate the text tariff against a worker](how-to/calibrate_text_tariff.md)
 - Reference: [Image baseline policy reference](reference/baseline_policy.md)
 - Reference: [Image model reference loader reference](reference/model_reference.md)
 <!-- END GENERATED: topics -->

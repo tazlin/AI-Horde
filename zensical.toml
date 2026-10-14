@@ -46,6 +46,7 @@ nav = [
         { "Use the style endpoints" = "how-to/use_style_endpoints.md" },
         { "Add styles to a frontend" = "how-to/add_styles_to_a_frontend.md" },
         { "Update a style integration" = "how-to/update_a_style_integration.md" },
+        { "Calibrate the text tariff" = "how-to/calibrate_text_tariff.md" },
     ] },
     { "Decisions" = "decisions/index.md" },
     { "Concepts" = [

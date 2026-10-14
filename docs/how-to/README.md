@@ -21,4 +21,5 @@ the ordered steps, the checks between them, and the way back if a step fails.
 | [Use the style endpoints](use_style_endpoints.md) | Read the published style contract, create text and image styles that declare a policy and placeholders, and send requests under them. |
 | [Add style authoring and styled requests to a frontend](add_styles_to_a_frontend.md) | Build style authoring controls from the published style contract, build request inputs from a style's declarations, preview with a dry run, and handle collections and style errors. |
 | [Update an existing style integration](update_a_style_integration.md) | The changes in AI Horde 5.1.13 that a client already using styles can observe, what to change for each, and how to check it. |
+| [Calibrate the text tariff against a worker](calibrate_text_tariff.md) | Run tools/text_tariff_bench.py against a KoboldCpp worker to measure tokenizer ratios, prefill and decode cost, cache reuse and truncation, and derive the tariff rates from the result. |
 <!-- END GENERATED: documents -->
