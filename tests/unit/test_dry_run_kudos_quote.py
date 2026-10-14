@@ -94,7 +94,7 @@ class TestImageQuote:
         assert ImageWaitingPrompt.extrapolate_dry_run_kudos(_wp(params={"hires_fix": True})) == 141
 
 
-def _generate_request(style=None, models=("a-model",)):
+def _generate_request(style=None, models=("a-model",), prompt="a prompt"):
     """Build a stand-in for a generate resource as it stands at the pre-validate cache lookup."""
     request_args = SimpleNamespace(
         models=list(models),
@@ -109,6 +109,7 @@ def _generate_request(style=None, models=("a-model",)):
         params={"n": 1, "max_length": 80},
         models=list(models),
         style_kudos=False,
+        prompt=prompt,
     )
     generate_request.get_extra_source_images_count = lambda: GenerateTemplate.get_extra_source_images_count(generate_request)
     return generate_request
@@ -150,3 +151,26 @@ class TestTextQuoteCacheKey:
         with_extras.args.extra_source_images = [{"image": "an-image"}]
 
         assert TextAsyncGenerate.get_hashed_params_dict(with_extras) != TextAsyncGenerate.get_hashed_params_dict(without_extras)
+
+    def test_prompts_of_different_lengths_hash_apart(self):
+        short = _generate_request(prompt="x" * 400)
+        long = _generate_request(prompt="x" * 40_000)
+
+        assert TextAsyncGenerate.get_hashed_params_dict(short) != TextAsyncGenerate.get_hashed_params_dict(long)
+
+    def test_prompts_of_equal_length_share_a_hash(self):
+        # The price depends on the prompt's size, not its text, so the key carries the estimate alone.
+        first = _generate_request(prompt="a" * 400)
+        second = _generate_request(prompt="b" * 400)
+
+        assert TextAsyncGenerate.get_hashed_params_dict(first) == TextAsyncGenerate.get_hashed_params_dict(second)
+
+    def test_the_tariff_version_is_part_of_the_key(self, monkeypatch):
+        from horde.apis.v2 import kobold as kobold_module
+
+        generate_request = _generate_request()
+        current_hash = TextAsyncGenerate.get_hashed_params_dict(generate_request)
+
+        monkeypatch.setattr(kobold_module, "TEXT_TARIFF_VERSION", "another-tariff")
+
+        assert TextAsyncGenerate.get_hashed_params_dict(generate_request) != current_hash

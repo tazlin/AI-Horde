@@ -99,6 +99,45 @@ def _run_text_gen_round_trip(
     return gen
 
 
+def _submit_reward_for_prompt(client, request_headers: dict[str, str], prompt: str) -> float:
+    """Queue a text request for ``prompt``, pop it, submit a fixed generation and return the reward."""
+    async_dict = {
+        "prompt": prompt,
+        "trusted_workers": True,
+        "validated_backends": False,
+        "max_length": 512,
+        "max_context_length": 2048,
+        "temperature": 1,
+        "models": TEST_MODELS,
+    }
+    async_req = client.post("/api/v2/generate/text/async", json=async_dict, headers=request_headers)
+    assert async_req.status_code < 400, async_req.get_data(as_text=True)
+    pop_dict = {
+        "name": "CICD Fake Scribe",
+        "models": TEST_MODELS,
+        "bridge_agent": request_headers["Client-Agent"],
+        "amount": 10,
+        "max_context_length": 4096,
+        "max_length": 512,
+    }
+    pop_req = client.post("/api/v2/generate/text/pop", json=pop_dict, headers=request_headers)
+    assert pop_req.status_code < 400, pop_req.get_data(as_text=True)
+    job_id = pop_req.get_json()["id"]
+    assert job_id is not None, pop_req.get_json()
+    submit_dict = {"id": job_id, "generation": "test " * 100, "state": "ok", "seed": 0}
+    submit_req = client.post("/api/v2/generate/text/submit", json=submit_dict, headers=request_headers)
+    assert submit_req.status_code < 400, submit_req.get_data(as_text=True)
+    return submit_req.get_json()["reward"]
+
+
+def test_a_longer_prompt_earns_more_for_the_same_generation(client, request_headers: dict[str, str]) -> None:
+    """The worker is paid for the prompt it processes, whatever max_length the request carried."""
+    short_prompt_reward = _submit_reward_for_prompt(client, request_headers, "a horde of cute stable robots")
+    long_prompt_reward = _submit_reward_for_prompt(client, request_headers, "a horde of cute stable robots " * 400)
+
+    assert long_prompt_reward > short_prompt_reward
+
+
 def test_simple_text_gen(client, request_headers: dict[str, str]) -> None:
     gen = _run_text_gen_round_trip(client, request_headers, submit_state="ok")
     assert len(gen["gen_metadata"]) == 0

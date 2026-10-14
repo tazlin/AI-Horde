@@ -29,6 +29,7 @@ One decision per record: what was chosen, what was rejected, and what it cost.
 | [Decay moderation evidence in tiers under an anonymizing ceiling](0015-tiered-moderation-evidence-retention.md) | accepted | 2026-09-29 |
 | [Protect koboldcpp instruct placeholders and publish the style contract](0017-protect-koboldcpp-placeholders-and-publish-the-style-contract.md) | accepted | 2026-09-13 |
 | [Keep evidence text in object storage and bound rejection floods with countermeasures](0018-evidence-text-in-object-storage-behind-countermeasures.md) | accepted | 2026-09-30 |
+| [Price a text job's prompt as the worker processes it, through one tariff shared by quote and settlement](0019-price-text-input-as-processed.md) | accepted | 2026-10-14 |
 
 ## Relationships
 
@@ -53,6 +54,7 @@ flowchart TD
     r0015["0015: Decay moderation evidence in tiers un…"]
     r0017["0017: Protect koboldcpp instruct placeholde…"]
     r0018["0018: Keep evidence text in object storage…"]
+    r0019["0019: Price a text job's prompt as the worke…"]
     r0001 --> r0003
     r0001 --> r0004
     r0001 --> r0005

@@ -403,8 +403,8 @@ class TextModels(v2.Models):
                         "What to do when the prompt does not fit the requested max_context_length. "
                         f"'{ContextFit.IGNORE.value}' sends it anyway and the worker cuts the front of it away, "
                         f"'{ContextFit.REJECT.value}' refuses the request, and "
-                        f"'{ContextFit.GROW.value}' raises max_context_length until the prompt fits and charges "
-                        "for the larger context."
+                        f"'{ContextFit.GROW.value}' raises max_context_length until the prompt fits. "
+                        "The price follows the prompt actually sent and max_length, not max_context_length."
                     ),
                 ),
                 "extra_slow_workers": fields.Boolean(

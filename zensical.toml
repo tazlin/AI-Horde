@@ -35,6 +35,7 @@ nav = [
         { "Prompt provenance" = "reference/prompt_provenance.md" },
         { "Moderation operations" = "reference/moderation_operations.md" },
         { "Style contract" = "reference/style_contract.md" },
+        { "Text kudos pricing" = "reference/text_kudos_pricing.md" },
     ] },
     { "How-to" = [
         { "Overview" = "how-to/README.md" },

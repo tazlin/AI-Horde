@@ -44,6 +44,7 @@ procedure for one subject sit together.
 - Reference: [Image baseline policy reference](reference/baseline_policy.md)
 - Reference: [Image model reference loader reference](reference/model_reference.md)
 - Reference: [Style contract reference](reference/style_contract.md)
+- Reference: [Text kudos pricing reference](reference/text_kudos_pricing.md)
 
 ### kudos
 
@@ -52,6 +53,7 @@ procedure for one subject sit together.
 - How-to: [Add an image baseline](how-to/add_image_baseline.md)
 - Reference: [Kudos accounting reference](reference/kudos_accounting.md)
 - Reference: [Image baseline policy reference](reference/baseline_policy.md)
+- Reference: [Text kudos pricing reference](reference/text_kudos_pricing.md)
 
 ### moderation
 

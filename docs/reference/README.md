@@ -24,4 +24,5 @@ The concepts they assume (what a worker is, what a job's lifecycle means) are in
 | [Image baseline policy reference](baseline_policy.md) | The two authorities a baseline-dependent request is checked against, what each one decides, and what applies to a baseline with no record. |
 | [Image model reference loader reference](model_reference.md) | Where the image model reference comes from, how beta (pending) models are merged over it, the environment that configures both, and what the loader exposes. |
 | [Style contract reference](style_contract.md) | What an image or text style may declare about the params a request may set and the placeholders its prompt accepts, and how a text request is sized against the prompt it ends up sending. |
+| [Text kudos pricing reference](text_kudos_pricing.md) | The tariff a text job is priced under: the prompt and output operands, the context multiplier, each settlement branch, the quote, the hold, the free-tier allowance and the quote cache key. |
 <!-- END GENERATED: documents -->

@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-import math
 import os
 from decimal import Decimal
 from typing import Any
@@ -12,6 +11,15 @@ from sqlalchemy.sql import expression
 from horde import vars as hv
 from horde.classes.base.kudos import StyleReward
 from horde.classes.base.waiting_prompt import WaitingPrompt
+from horde.classes.kobold.pricing import (
+    DEFAULT_QUOTE_MODEL_BILLIONS,
+    billing_prompt_tokens,
+    estimate_billing_prompt_tokens,
+    free_output_allowance,
+    matched_targeting_applies,
+    quote_text_generation,
+    reference_prompt_tokens,
+)
 from horde.flask import db
 from horde.logger import logger
 from horde.model_reference import model_reference
@@ -54,6 +62,9 @@ class TextWaitingPrompt(WaitingPrompt):
         self.total_usage = round(self.max_length * self.n / hv.thing_divisors["text"], 2)
         self.softprompt = kwargs.get("softprompt")
         self.prepare_job_payload(self.params)
+        # Quoted here, as the image line does, so the accepted response and the upfront hold carry the
+        # same per-job price a dry run would.
+        self.calculate_kudos()
 
     @logger.catch(reraise=True)
     def prepare_job_payload(self, initial_dict=None):
@@ -135,6 +146,12 @@ class TextWaitingPrompt(WaitingPrompt):
         else is False
         Second entry in the tuple is the max tokens that can be used without upfront kudos
         Third entry in the tuple is whether the upfront kudos requirement prevents downgrading to resolve this.
+
+        The output allowance is first set by queue pressure and worker supply, then reduced for a prompt
+        past the reference size, so that the modelled work of a free request stays within what the
+        allowance buys at the reference prompt. The prompt is measured as the worker will process it,
+        capped at what the requested context keeps beside the allowance, so a downgrade to the returned
+        allowance clears both the output and the prompt trigger in one pass.
         """
         queue = counted_totals["queued_text_requests"]
         max_tokens = 512 + (total_threads * 5) - round(queue * 0.9)
@@ -145,46 +162,78 @@ class TextWaitingPrompt(WaitingPrompt):
             max_tokens = 256
         if max_tokens > 512:
             max_tokens = 512
+        max_tokens = free_output_allowance(
+            prompt_tokens=estimate_billing_prompt_tokens(self.prompt),
+            free_output_tokens=max_tokens,
+            reference_prompt_tokens=reference_prompt_tokens(),
+            max_context_length=self.max_context_length,
+        )
         if self.max_length > max_tokens:
             return (True, max_tokens, False)
         if os.getenv("HORDE_UPFRONT_KUDOS_ON_WORKERLIST", "0") == "1" and len(self.workers) > 0:
             return (True, max_tokens, True)
         return (False, max_tokens, False)
 
-    def downgrade(self, max_tokens):
-        """Ensures this WP requirements are not exceeding upfront kudos requirements"""
+    def downgrade(self, max_tokens: int) -> None:
+        """Mutate this request to fit the free-tier output allowance and accept slow workers.
+
+        Every field that carries the output allowance moves together: the settlement cap on the output
+        operand reads ``things``, the worker reads ``gen_payload``, the usage aggregate reads
+        ``total_usage`` and the accepted response reads ``kudos``. Admission downgrades before any job
+        is dispatched, when ``n`` still equals ``jobs``.
+
+        Args:
+            max_tokens: The output allowance the request may keep without an upfront hold.
+        """
         self.slow_workers = True
-        while self.max_length > max_tokens:
+        if self.max_length > max_tokens:
             self.max_length = max_tokens
-            self.params["max_length"] = self.max_length
-            self.gen_payload["max_length"] = self.max_length
+            self.things = max_tokens
+            self.params["max_length"] = max_tokens
+            self.gen_payload["max_length"] = max_tokens
+            self.total_usage = round(self.max_length * self.n / hv.thing_divisors["text"], 2)
+            self.calculate_kudos()
             logger.info(f"Text WP {self.id} was downgraded to {self.max_length} tokens")
         db.session.commit()
 
-    def calculate_kudos(self):
-        if os.getenv("HORDE_REQUIRE_MATCHED_TARGETING", "0") == "1" and len(self.workers) > 0:
-            self.kudos = 0.1
-            return self.kudos
-        # Slimmed down version of procgen.get_gen_kudos()
-        # As we don't know the worker's trusted status.
-        # It exists here in order to allow us to calculate dry_runs
-        context_multiplier = 1.2 + (2.2 ** (math.log2(self.max_context_length / 1024)))
-        # Prevent shenanigans
-        if context_multiplier > 30:
-            context_multiplier = 30
-        if context_multiplier < 0.1:
-            context_multiplier = 0.1
-        if len(self.models) > 0:
-            model_name = self.models[0].model
-        else:
-            # For empty model lists, we assume they're going to run into a 13B model
-            return round(self.max_length * 13 * context_multiplier / 100, 2)
-        if not model_reference.is_known_text_model(model_name):
-            return self.max_length * (2.7 / 100) * context_multiplier
-        model_multiplier = model_reference.get_text_model_multiplier(model_name)
-        parameter_bonus = (max(model_multiplier, 13) / 13) ** 0.20
-        self.kudos = round(
-            self.max_length * parameter_bonus * model_multiplier * context_multiplier / 100,
-            2,
+    def calculate_kudos(self) -> float:
+        """Return the per-job quote for this request and store it on ``kudos``.
+
+        The quote applies the settlement kernel to the prompt as the worker will process it and the
+        whole requested ``max_length``, assuming a validated backend and a trusted owner. Among the
+        requested models it prices the largest known one, which is also what the upfront hold covers,
+        so a small model listed next to a large one does not lower the price.
+
+        Returns:
+            The per-job quote, before the per-job burn and the request tax.
+        """
+        self.kudos = quote_text_generation(
+            output_allowance=self.max_length,
+            prompt_tokens=billing_prompt_tokens(
+                self.prompt,
+                max_context_length=self.max_context_length,
+                max_length=self.max_length,
+            ),
+            model_multiplier=self._quote_model_multiplier(),
+            matched_targeting=matched_targeting_applies(len(self.workers)),
         )
         return self.kudos
+
+    def _quote_model_multiplier(self) -> float | None:
+        """Return the model size the quote prices, in billions of parameters.
+
+        Returns:
+            The largest multiplier among the request's known models; ``DEFAULT_QUOTE_MODEL_BILLIONS``
+            when the request names no model; ``None`` when every named model is unknown.
+        """
+        model_names = [model.model for model in self.models]
+        if len(model_names) == 0:
+            return DEFAULT_QUOTE_MODEL_BILLIONS
+        known_multipliers = [
+            model_reference.get_text_model_multiplier(model_name)
+            for model_name in model_names
+            if model_reference.is_known_text_model(model_name)
+        ]
+        if len(known_multipliers) == 0:
+            return None
+        return max(known_multipliers)

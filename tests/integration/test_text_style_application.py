@@ -29,6 +29,13 @@ STYLE_PROMPT = "### Instruction:\n{p}\n\n### Response:\n"
 STYLE_PARAMS: dict[str, Any] = {"max_length": 80, "max_context_length": 1024, "temperature": 0.7}
 
 STYLE_KUDOS_SURCHARGE = 2
+
+DEFAULT_PROMPT = "a horde of cute stable robots repairing a mainframe"
+"""The prompt every request here sends unless a case supplies its own."""
+
+STYLED_DEFAULT_PROMPT = STYLE_PROMPT.format(p=DEFAULT_PROMPT)
+"""What a style with the default template sends to the worker for the default prompt. A quote prices the prompt as
+sent, so an unstyled control that should quote the same as a styled request has to send this text itself."""
 """What a request pays on top of its params for generating under someone else's style."""
 
 TEMPLATE_FIELDS = [
@@ -132,7 +139,7 @@ def post_request(client: FlaskClient, request_headers: dict[str, str], **body: A
         The response, so a case can assert on a rejection as well as on a queued request.
     """
     request_body: dict[str, Any] = {
-        "prompt": "a horde of cute stable robots repairing a mainframe",
+        "prompt": DEFAULT_PROMPT,
         "models": TEXT_MODELS,
         "trusted_workers": True,
         "validated_backends": False,
@@ -368,11 +375,12 @@ class TestTextStyleQuote:
         request_headers: dict[str, str],
         make_api_user,
     ) -> None:
-        # The baseline sends exactly the params the style carries, so the only difference between the
-        # two quotes is the style itself. The styled request sends a temperature no other case uses:
-        # quotes are cached against the params they were computed from, and temperature changes that
-        # key without changing the price, which comes from max_length, max_context_length and the model.
-        unstyled_quote = dry_run_kudos(client, request_headers, params=dict(STYLE_PARAMS))
+        # The baseline sends exactly the params the style carries and the prompt the style resolves to,
+        # so the only difference between the two quotes is the style itself. The styled request sends a
+        # temperature no other case uses: quotes are cached against the params they were computed from,
+        # and temperature changes that key without changing the price, which comes from the prompt as
+        # sent, max_length and the model.
+        unstyled_quote = dry_run_kudos(client, request_headers, prompt=STYLED_DEFAULT_PROMPT, params=dict(STYLE_PARAMS))
 
         owner = make_api_user(trusted=True, customizer=True, kudos=100)
         owner_headers = {"apikey": owner.api_key, "Client-Agent": request_headers["Client-Agent"]}
@@ -388,8 +396,8 @@ class TestTextStyleQuote:
 
     def test_your_own_style_adds_no_surcharge(self, client, request_headers: dict[str, str]) -> None:
         # The surcharge pays the style's author, so a request generating under its own author's style
-        # has nobody to pay and is quoted at what its params come to.
-        unstyled_quote = dry_run_kudos(client, request_headers, params=dict(STYLE_PARAMS))
+        # has nobody to pay and is quoted at what its params and resolved prompt come to.
+        unstyled_quote = dry_run_kudos(client, request_headers, prompt=STYLED_DEFAULT_PROMPT, params=dict(STYLE_PARAMS))
 
         with created_style(client, request_headers, style_body("text apply own style")) as style_id:
             styled_quote = dry_run_kudos(
@@ -424,7 +432,7 @@ class TestTextStyleQuote:
             assert styled.get_json()["resolved"]["params"] == shared_params
             assert styled.get_json()["resolved"]["models"] == TEXT_MODELS
 
-            unstyled_quote = dry_run_kudos(client, request_headers, params=shared_params)
+            unstyled_quote = dry_run_kudos(client, request_headers, prompt=STYLED_DEFAULT_PROMPT, params=shared_params)
 
             assert unstyled_quote == styled.get_json()["kudos"] - STYLE_KUDOS_SURCHARGE
 
@@ -1252,9 +1260,10 @@ class TestTextDryRunResolvedRequest:
             assert resolved["prompt"].startswith("### Instruction:")
             assert resolved["params"]["max_length"] == STYLE_PARAMS["max_length"]
 
-    def test_the_grown_context_is_reported_and_charged_for(self, client, request_headers: dict[str, str]) -> None:
-        # A quote is cached against the params it was computed from, and both requests here send the
-        # same params, so the grown one has to skip that cache to be quoted at its grown context.
+    def test_the_grown_context_is_reported_and_priced_in_full(self, client, request_headers: dict[str, str]) -> None:
+        # Under ignore the worker keeps only what the 1024 context holds beside the 240 tokens of output,
+        # and the price follows that. Growing the context lets the whole prompt in, so the grown request
+        # is priced as the same prompt sent into a 2048 context that it fits.
         ungrown = post_dry_run(
             client,
             request_headers,
@@ -1268,10 +1277,18 @@ class TestTextDryRunResolvedRequest:
             context_fit="grow",
             params={"max_length": 240, "max_context_length": 1024},
         )
+        fitting = post_dry_run(
+            client,
+            request_headers,
+            prompt=TestContextFit.over_long_prompt,
+            params={"max_length": 240, "max_context_length": 2048},
+        )
 
         assert ungrown.status_code == 200, ungrown.get_data(as_text=True)
         assert grown.status_code == 200, grown.get_data(as_text=True)
+        assert fitting.status_code == 200, fitting.get_data(as_text=True)
         assert grown.get_json()["resolved"]["params"]["max_context_length"] == 2048
+        assert grown.get_json()["kudos"] == fitting.get_json()["kudos"]
         assert grown.get_json()["kudos"] > ungrown.get_json()["kudos"]
 
     def test_a_queued_request_carries_no_resolved_request(self, client, request_headers: dict[str, str]) -> None:
@@ -1291,10 +1308,15 @@ class TestTextStyleApplicationCompatibility:
         client,
         request_headers: dict[str, str],
     ) -> None:
-        # The baseline sends exactly the style's params and a temperature no other case uses, so the
-        # two are quoted under different cache keys. Temperature does not affect the price, which
-        # comes from max_length, max_context_length and the model.
-        unstyled = post_dry_run(client, request_headers, params={**STYLE_PARAMS, "n": 2, "temperature": 0.9})
+        # The baseline sends exactly the style's params, the prompt the style resolves to and a
+        # temperature no other case uses, so the two are quoted under different cache keys. Temperature
+        # does not affect the price, which comes from the prompt, max_length, max_context_length and the model.
+        unstyled = post_dry_run(
+            client,
+            request_headers,
+            prompt=STYLED_DEFAULT_PROMPT,
+            params={**STYLE_PARAMS, "n": 2, "temperature": 0.9},
+        )
         assert unstyled.status_code == 200, unstyled.get_data(as_text=True)
 
         with created_style(client, request_headers, style_body("text compatibility")) as style_id:

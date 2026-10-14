@@ -30,6 +30,7 @@ from horde.classes.kobold.genstats import (
     get_compiled_textgen_stats_models,
     get_compiled_textgen_stats_totals,
 )
+from horde.classes.kobold.pricing import TEXT_TARIFF_VERSION, billing_prompt_tokens, estimate_billing_prompt_tokens
 from horde.classes.kobold.request_fit import (
     DEFAULT_MAX_CONTEXT_LENGTH,
     DEFAULT_MAX_LENGTH,
@@ -53,7 +54,6 @@ from horde.enums import KudosEntryType, RequestTerminalOutcome
 from horde.flask import cache, db
 from horde.limiter import limiter
 from horde.logger import logger
-from horde.model_reference import model_reference
 from horde.request_scheduling import record_request_cancellation_forecast
 from horde.utils import hash_dictionary
 from horde.validation import ParamValidator
@@ -167,17 +167,9 @@ class TextAsyncGenerate(GenerateTemplate):
         )
         self.upload_source_images()
         _, total_threads = database.count_active_workers("text")
-        highest_multiplier = 0
-        if len(self.models) == 0:
-            required_kudos = 20 * self.wp.n
-        else:
-            # We find the highest multiplier to avoid someone gaming the system by requesting
-            # a small model along with a big model.
-            for model in self.models:
-                model_multiplier = model_reference.get_text_model_multiplier(model)
-                if model_multiplier > highest_multiplier:
-                    highest_multiplier = model_multiplier
-            required_kudos = round(self.wp.max_length * highest_multiplier / 21, 2) * self.wp.n
+        # The hold covers what the jobs will debit: the per-job quote, which already prices the largest
+        # requested model and the prompt as the worker will process it, plus the per-job burn.
+        required_kudos = round(self.wp.calculate_extra_kudos_burn(self.wp.kudos) * self.wp.n, 2)
         needs_kudos, tokens, disable_downgrade = self.wp.require_upfront_kudos(database.retrieve_totals(), total_threads)
         if self.sharedkey and self.sharedkey.kudos != -1 and required_kudos > self.sharedkey.kudos:
             if self.args.allow_downgrade and not disable_downgrade:
@@ -201,12 +193,24 @@ class TextAsyncGenerate(GenerateTemplate):
                 if self.args.allow_downgrade and not disable_downgrade:
                     self.wp.downgrade(tokens)
                 else:
+                    prompt_tokens = estimate_billing_prompt_tokens(self.wp.prompt)
+                    processed_tokens = billing_prompt_tokens(
+                        self.wp.prompt,
+                        max_context_length=self.wp.max_context_length,
+                        max_length=self.wp.max_length,
+                    )
                     self.wp.delete()
+                    if processed_tokens < prompt_tokens:
+                        prompt_clause = (
+                            f"a prompt of about {prompt_tokens} tokens, of which about {processed_tokens} fit the requested context,"
+                        )
+                    else:
+                        prompt_clause = f"a prompt of about {prompt_tokens} tokens"
                     raise e.KudosUpfront(
                         required_kudos,
                         self.username,
-                        message=f"Due to heavy demand, for requests over {tokens} tokens, "
-                        "the client needs to already have the required kudos. "
+                        message=f"Due to heavy demand, a request with {prompt_clause} "
+                        f"may generate at most {tokens} tokens unless the client already has the required kudos. "
                         f"This request requires {required_kudos} kudos to fulfil.",
                     )
 
@@ -275,6 +279,14 @@ class TextAsyncGenerate(GenerateTemplate):
         # post-validate store, so it reads the request arg; style_kudos is still False at lookup
         # time.
         gen_payload["styled"] = self.args.style is not None
+        # The price follows the prompt's estimate, capped by params the key already carries. At the
+        # pre-validate lookup self.prompt is the request's own prompt; at the post-validate store it is
+        # the resolved one. Both are the same text for every request the cache may answer, since a style
+        # or template fields already disqualify it and base validation leaves a text prompt as it
+        # arrived. The tariff version keeps a quote computed under
+        # an earlier tariff from answering.
+        gen_payload["prompt_tokens"] = estimate_billing_prompt_tokens(self.prompt)
+        gen_payload["tariff"] = TEXT_TARIFF_VERSION
         params_hash = hash_dictionary(gen_payload)
         # logger.debug([params_hash,gen_payload])
         return params_hash

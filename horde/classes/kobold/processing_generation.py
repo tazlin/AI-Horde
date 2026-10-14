@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-import math
-import os
 import time
 
 from horde import vars as hv
@@ -13,6 +11,12 @@ from horde.bridge_reference import (
 )
 from horde.classes.base.processing_generation import ProcessingGeneration
 from horde.classes.kobold.genstats import record_text_statistic
+from horde.classes.kobold.pricing import (
+    billing_prompt_tokens,
+    calculate_text_generation_reward,
+    count_output_tokens,
+    matched_targeting_applies,
+)
 from horde.flask import db
 from horde.logger import logger
 from horde.metrics import (
@@ -96,33 +100,31 @@ class TextProcessingGeneration(ProcessingGeneration):
         }
         return ret_dict
 
-    def get_gen_kudos(self):
-        if os.getenv("HORDE_REQUIRE_MATCHED_TARGETING", "0") == "1" and len(self.wp.workers) > 0:
-            return 0.1
-        # This formula creates an exponential increase on the kudos consumption, based on the context requested
-        # 1024 context is considered the base.
-        # The reason is that higher context has exponential VRAM requirements
-        actual_context_length = self.get_things_count(self.wp.prompt)
-        context_multiplier = 1.2 + (2.2 ** (math.log2(actual_context_length / 1024)))
-        # Prevent shenanigans
-        if context_multiplier > 30:
-            context_multiplier = 30
-        if context_multiplier < 0.1:
-            context_multiplier = 0.1
-        # If a worker serves an unknown model, they only get 1 kudos, unless they're trusted in which case they get 20
-        if not model_reference.is_known_text_model(self.model):
-            if not self.worker.user.trusted:
-                return context_multiplier
-            # Trusted users with an unknown model are considered as running a 2.7B model
-            return self.get_things_count() * context_multiplier * (2.7 / 100)
-        # This is the approximate reward for generating with a 2.7 model at 4bit
-        model_multiplier = model_reference.get_text_model_multiplier(self.model)
-        parameter_bonus = (max(model_multiplier, 13) / 13) ** 0.20
-        kudos = self.get_things_count() * parameter_bonus * model_multiplier / 125
-        # Unvalidated backends have their rewards cut to 30%
-        if not is_backed_validated(self.worker.bridge_agent):
-            kudos *= 0.3
-        return round(kudos * context_multiplier, 2)
+    def get_gen_kudos(self) -> float:
+        """Return the kudos this job earns its worker.
+
+        The prompt operand is the part of the prompt the worker processes, the text it was sent capped
+        at what the requested context keeps beside ``max_length``; the output operand is what it
+        returned, capped by the requested ``max_length``. The arithmetic lives in
+        ``horde.classes.kobold.pricing`` so the quote and the settlement cannot drift apart.
+
+        Returns:
+            The nominal reward, before owner escrow and the requester's burn.
+        """
+        known_model = model_reference.is_known_text_model(self.model)
+        model_multiplier = model_reference.get_text_model_multiplier(self.model) if known_model else None
+        return calculate_text_generation_reward(
+            output_tokens=self.get_things_count(),
+            prompt_tokens=billing_prompt_tokens(
+                self.wp.prompt,
+                max_context_length=self.wp.max_context_length,
+                max_length=self.wp.things,
+            ),
+            model_multiplier=model_multiplier,
+            owner_trusted=self.worker.user.trusted,
+            backend_validated=is_backed_validated(self.worker.bridge_agent),
+            matched_targeting=matched_targeting_applies(len(self.wp.workers)),
+        )
 
     def log_aborted_generation(self):
         record_text_statistic(self)
@@ -193,18 +195,19 @@ class TextProcessingGeneration(ProcessingGeneration):
         submit_genstats_record_duration.record(time.monotonic() - genstats_t0, {"horde.gentype": "text"})
         return kudos
 
-    def get_things_count(self, generation=None):
+    def get_things_count(self, generation: str | None = None) -> int:
+        """Return the output operand for a returned generation.
+
+        Args:
+            generation: The text to count; the stored generation when omitted.
+
+        Returns:
+            0 when there is no generation; otherwise its token estimate, capped by the request's
+            ``max_length``. The prompt is never counted here.
+        """
         if generation is None:
-            if self.generation is None:
-                return 0
             generation = self.generation
-        quick_token_count = math.ceil(len(generation) / 4)
-        if quick_token_count < 20:
-            quick_token_count = 20
-        if self.wp.things > quick_token_count:
-            # logger.debug([self.wp.things,quick_token_count])
-            return quick_token_count
-        return self.wp.things
+        return count_output_tokens(generation, self.wp.things)
 
     def record(self, things_per_sec, kudos):
         # Extended function to try and catch workers using unreasonable
