@@ -237,7 +237,7 @@ no quote computed under the previous tariff is reused during the two-day TTL.
 Every submission writes a `text_gen_stats` row through `record_text_statistic` with the model, the
 bridge, `max_length`, `max_context_length`, `prompt_length` and `generation_length` in characters, the
 pop time as `created` and the submit time as `finished`. `generation_length` is null for a job that
-returned nothing and for rows written before `sql_statements/5.1.14.txt` added the column. Together the
+returned nothing and for rows written before `sql_statements/5.1.15.txt` added the column. Together the
 columns let prompt-processing and generation cost be regressed from live traffic, server-measured.
 
 ## Sharp edges

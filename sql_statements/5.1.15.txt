@@ -1,0 +1,18 @@
+-- Run with psql in its default autocommit mode. Pass -v ON_ERROR_STOP=1 so a
+-- failure stops the migration.
+--
+-- The length of the text a worker returned, recorded beside the prompt length
+-- the statistic already carries. With the created and finished times this lets
+-- the cost of prompt processing and of generation be regressed from live
+-- traffic, server-measured, for the text tariff's rates. Nullable with no
+-- default, so this is a catalogue-only change in PostgreSQL: no table rewrite,
+-- and only a brief AccessExclusiveLock. An older application version ignores
+-- the column, so this migration can be applied before the code that writes it
+-- is deployed. Rows from before the migration keep a null.
+SET lock_timeout = '3s';
+
+ALTER TABLE text_gen_stats
+  ADD COLUMN IF NOT EXISTS generation_length INTEGER NULL;
+
+COMMENT ON COLUMN text_gen_stats.generation_length IS
+  'Characters the worker returned. Null for a job that returned nothing, and for rows written before the column existed.';
