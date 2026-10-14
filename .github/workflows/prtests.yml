@@ -533,6 +533,7 @@ jobs:
           horde/telemetry.py
           horde/metrics.py
           horde/classes/base/kudos.py
+          horde/classes/kobold/pricing.py
           horde/database/kudos_counters.py
           horde/database/kudos_db.py
           horde/database/kudos_ledger.py

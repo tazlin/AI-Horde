@@ -7,6 +7,17 @@ from functools import partialmethod
 
 from loguru import logger
 
+__all__ = [
+    "is_init_log",
+    "is_msg_log",
+    "is_stderr_log",
+    "is_stdout_log",
+    "logger",
+    "quiesce_logger",
+    "reconfigure_from_args",
+    "set_logger_verbosity",
+]
+
 STDOUT_LEVELS = ["GENERATION", "PROMPT"]
 INIT_LEVELS = ["INIT", "INIT_OK", "INIT_WARN", "INIT_ERR"]
 MESSAGE_LEVELS = ["MESSAGE"]

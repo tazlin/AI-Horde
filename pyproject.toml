@@ -194,6 +194,7 @@ module = [
     "horde.metrics",
     "horde.request_scheduling",
     "horde.classes.base.kudos",
+    "horde.classes.kobold.pricing",
     "horde.database.kudos_counters",
     "horde.database.kudos_db",
     "horde.database.kudos_ledger",
