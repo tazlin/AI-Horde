@@ -62,5 +62,8 @@ threshold is flagged for review.
 
 ## More Information
 
+Alpha disposition: not implemented; the fork stays open as a hedge. Retaining reported usage does not switch the
+policy. Accepting this record is a separate decision.
+
 This record and [ADR 0027](0027-price-chat-generations-on-requested-length.md) are mutually exclusive. Accepting one
 rejects the other. The data ADR 0027 stores is what this record needs to be evaluated.

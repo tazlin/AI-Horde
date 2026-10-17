@@ -43,7 +43,9 @@ publishing is best effort. A stretched poll covers a lost message. The front hol
 ### Consequences
 
 - Good: A wait costs the front a coroutine and the Horde nothing until the status read.
-- Good: The Horde instances see about two status reads per request while signals work.
+- Good: Notifications avoid waiting until the next ordinary poll after completion.
+- Bad: Polling remains active while subscribed; status load includes initial/final reads, fallback polls and bounded
+  signal-settle retries. It is not a fixed two reads per request.
 - Bad: A new process to deploy, drain and monitor; a request is pinned to the process that accepted it.
 - Bad: Every front process receives every chat event; the signal channel must carry only terminal and per-generation
   events, never tokens.
@@ -52,14 +54,15 @@ publishing is best effort. A stretched poll covers a lost message. The front hol
 
 ### Separate ASGI process with signal and fallback poll
 
-- Good: Scales by processes; the Horde's thread pool is untouched.
+- Good: Scales waiting without occupying a native thread for each open connection.
+- Bad: Status, submit and cancel HTTP calls still consume the native thread pool and need an aggregate budget.
 - Bad: One more moving part, and Redis pub/sub is a new dependency pattern for the repository.
 
 ### Separate ASGI process polling only
 
 - Good: No Redis dependency.
-- Bad: Status load scales with open waits divided by the poll interval, and the status route's per-address limit
-  binds unless the proxy passkey is used.
+- Bad: Status load scales with open waits divided by the poll interval. The limiter includes the concrete request
+  path, so it is not one shared 60/minute budget across all requests; the passkey preserves attribution.
 
 ### Waiting inside Flask
 
@@ -70,3 +73,8 @@ publishing is best effort. A stretched poll covers a lost message. The front hol
 
 The draft implementation follows the chosen option. The native cache in `horde/horde_redis.py` fans writes out to
 every configured server; chat signal and stream keys live only on the primary.
+
+Correctness amendments: terminal status comes from committed database state or an explicitly fresh cache; publishing
+after commit alone does not invalidate caches. Waits, native-call acquisition, response writes and shutdown have
+finite budgets, including streamed requests. Native cancellation is best effort and preserves text accounting.
+Crashes may leave charged work uncollected; durable delivery recovery is outside the alpha.

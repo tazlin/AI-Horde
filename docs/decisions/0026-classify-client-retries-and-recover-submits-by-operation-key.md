@@ -20,7 +20,8 @@ duplicate work, and what happens when the front never learns whether a submit re
 
 ## Decision Drivers
 
-- A job that exists must not be recreated by a client retry.
+- Internal recovery of a possibly accepted native submission must not create another job.
+- Client retries without stable caller identity cannot be guaranteed to represent the same logical request.
 - A retry that is safe (nothing was submitted) must stay allowed.
 - No client change can be required.
 - A header is mitigation; it cannot help when the client never receives the response.
@@ -41,20 +42,30 @@ The front distinguishes three states: not submitted, submitted with an id, and o
 failure after the request was sent), and leaves refused connections retriable. The front generates a UUID per client
 request and sends it as the operation key. The native chat route keeps a unique index on user id and key, claimed in
 the same transaction as activation in `horde/classes/base/waiting_prompt.py`, `WaitingPrompt.activate`; a collision
-returns the existing request id. Retention is the request row's lifetime.
+returns the existing request id and creation metadata after verifying the same normalized effective request.
+Keep a fingerprint and reject reuse with changed content/options. Lookup existing claims before repeating availability
+checks or side effects. Retention covers the request lifetime and the maximum internal recovery horizon; preserve a
+minimal claim tombstone if ordinary cleanup would remove it too early.
+
+A new incoming client HTTP request gets a new operation key. This cannot deduplicate a client retry after a lost
+response, a front crash, or a retry routed to another process. The header reduces retries only for clients that
+receive and honor it. Stable caller idempotency can be added separately with explicit scope, fingerprint, retention
+and replay semantics. Never use prompt contents or a retry-count header as identity.
 
 ### Consequences
 
-- Good: The common duplicate paths close without client changes.
+- Good: Native submission recovery avoids duplicate activation/tax without requiring client changes.
 - Good: An ambiguous submit is recoverable by the front, not only by the user.
-- Bad: A retry after the request row is gone creates a new job; this is documented.
+- Bad: Independent client retries can still create charged work; no exactly-once client delivery is promised.
+- Bad: After the retained claim expires the guarantee ends; internal recovery must not outlive that window.
 - Bad: A new column and unique index on `waiting_prompts`.
 
 ## Pros and Cons of the Options
 
 ### Classification plus operation key
 
-- Good: Covers both the header-reading SDK and the client that never saw the response.
+- Good: Gives header-reading clients useful guidance and makes internal ambiguous submits recoverable.
+- Bad: Cannot recognize a fresh client retry without a stable logical-request key.
 - Bad: Transactional work at activation, which commits in more than one place today.
 
 ### Classification alone
@@ -70,3 +81,8 @@ returns the existing request id. Retention is the request row's lifetime.
 ## More Information
 
 Rulings R8 and R22 of the review. The design's D8 asked for the operation key; the review added the classification.
+
+The claim, reservation, activation and tax must be atomic despite commits in today's activation path. Test concurrent
+duplicates and a lost acknowledgment. Metrics distinguish internal recovery matches from client retry hints; their
+intersection is not a measurement of prevented client duplicates. Post-submission SSE headers also suppress suggested
+retries without claiming that a disconnected client receives the hint.

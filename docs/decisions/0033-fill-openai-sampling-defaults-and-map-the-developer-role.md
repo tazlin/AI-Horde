@@ -15,7 +15,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 OpenAI semantics for an omitted sampling field are temperature 1.0, top_p 1.0, penalties 0 and no repetition
 penalty. A chat job that omits a field reaches koboldcpp's KoboldAI endpoint defaults, which include a repetition
-penalty and a different temperature. Newer OpenAI SDK defaults send the instruction message with role `developer`,
+penalty and a different temperature. Some OpenAI-compatible clients send instruction messages with role `developer`,
 which the draft refuses. What does an omission mean, and what does `developer` mean?
 
 ## Decision Drivers
@@ -40,7 +40,9 @@ as `system` before any worker sees it.
 
 ### Consequences
 
-- Good: Deterministic across scribes; clients that send `developer` work.
+- Good: Explicit parameter defaults across scribes; clients that send `developer` can use older templates.
+- Bad: Rewriting `developer` to `system` does not preserve distinct role precedence. Document this limitation and
+  do not advertise a developer-role capability while all requests are normalized this way.
 - Bad: A worker's own defaults are never used for chat jobs, even where an operator tuned them.
 
 ## Pros and Cons of the Options
@@ -61,5 +63,9 @@ as `system` before any worker sees it.
 - Bad: Fails real clients for no gain.
 
 ## More Information
+
+Alpha scope: tested text/history behaviour and neutral defaults, with non-default optional samplers routed by declared
+support. Defaults do not guarantee identical answers across workers. Keep a typed message boundary so role-aware
+backends can later preserve original roles under an explicit extension contract.
 
 Rulings R6 and R23 of the review.

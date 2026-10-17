@@ -69,3 +69,9 @@ request needs.
 
 Ruling R21 of the review. The worker contract that carries these fields is sketched in the review document under
 "Worker contract v2".
+
+Alpha scope: explicit chat opt-in, the current served model, actual chat limits and implemented optional sampling
+features. Opt-in includes a tested baseline text/history/defaults contract. Missing declarations disable support;
+model changes update the declaration, while an in-flight assignment retains its model/limit snapshot. Add vision,
+tools, logprobs or streaming declarations only alongside working payload, submit and response contracts. An online
+capability union is discovery metadata, not proof that one worker supports every advertised combination.

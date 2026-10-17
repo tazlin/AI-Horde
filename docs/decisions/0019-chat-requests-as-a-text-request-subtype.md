@@ -17,7 +17,7 @@ An OpenAI chat request is a `messages` array with sampling fields. The native te
 the same sampling fields, queued in `waiting_prompts`, priced by `max_length`, matched to workers by
 `horde/database/text_functions.py`, `get_sorted_text_wp_filtered_to_worker`, and settled by
 `horde/classes/kobold/processing_generation.py`. Chat needs the messages carried to the worker, usage and finish
-reason carried back, and nothing else the text path does not already do. Where should a chat request live?
+reason carried back, with the existing queue and accounting reused. Where should a chat request live?
 
 ## Decision Drivers
 
@@ -56,7 +56,9 @@ discriminator, so an id from the other family is not found.
 
 ### A `TextWaitingPrompt` with a nullable `messages` column
 
-- Good: Inherits every text behaviour by construction.
+- Good: Reuses the text queue and accounting without a second implementation.
+- Bad: String-based completion predicates, pending-generation queries, statistics, moderation projections and
+  cleanup require an explicit audit; a structured message alone does not satisfy the existing lifecycle.
 - Bad: The estimate prompt is a second representation that must be kept in step.
 
 ### A separate polymorphic request class and table
@@ -74,3 +76,8 @@ discriminator, so an id from the other family is not found.
 
 The draft implementation already follows the chosen option. The discriminator column is the amendment the draft
 needs before `messages` can be deferred, since the chat-ness property reads the column today.
+
+Alpha scope: one text-only choice and one requested model. Persist the structured message and its compatible string
+generation in the same completion transition. Empty string is a completed generation; future tool-only messages need
+an explicit successful structured-output representation. Add tools/response-format storage when that feature ships,
+not as a prerequisite for text chat. Native text cancellation economics remain unchanged.

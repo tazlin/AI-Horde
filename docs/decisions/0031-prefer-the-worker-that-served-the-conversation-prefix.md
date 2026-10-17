@@ -66,4 +66,8 @@ eligible worker. The gain is measured before the preference is widened.
 
 ## More Information
 
+Alpha disposition: deferred to beta, including the request column, public options and Redis keys. Measure benefit before adding
+scheduling state. Anonymous callers sharing the native anonymous user need an explicit affinity-isolation policy;
+future affinity must also have a bounded latency penalty.
+
 Ruling R12 of the review. The design author's reply asked for the scoping and the bounded penalty recorded here.

@@ -37,14 +37,18 @@ Chosen option: "Route by declared support; a default-valued field counts as omit
 sampling field is refused unless the client opts into dropping it".
 
 Capability fields are hard requirements: the request is routed only to workers declaring them, and when none is
-online the answer is 503 with `Retry-After`. Sampling fields at their documented default are treated as omitted. A
-non-default sampling field that no eligible worker supports is refused with 400 naming the field, unless
-`horde.require_parameters` is false, in which case it is dropped and listed in the response under
-`x_horde.ignored_parameters`.
+online the answer is 503 with `Retry-After`. Sampling fields at their documented default are omitted for routing.
+A field/value outside the implemented service contract is 400 naming the field. A supported non-default value with
+no currently eligible worker is 503, decided by the front from the native `is_possible` answer after submission, so a
+temporary worker outage is not described as invalid input. The native submit path does not change for this.
+
+The alpha uses strict behaviour only. A future opt-in `horde.require_parameters: false` mode may drop unsupported sampling
+fields with explicit reporting; it is not required for the alpha. Capability fields are never dropped. Accept only named
+default no-ops such as empty tools or false logprobs; this is not permission to ignore arbitrary unknown fields.
 
 ### Consequences
 
-- Good: The default never hides a changed answer; the lenient mode is explicit.
+- Good: The default never hides a changed answer; any later lenient mode must be explicit.
 - Bad: Some clients will meet a 400 on a field they always send, and must either stop sending it or opt in.
 
 ## Pros and Cons of the Options

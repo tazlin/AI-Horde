@@ -62,4 +62,9 @@ address. Nothing else distinguishes anonymous requests.
 
 ## More Information
 
+Alpha operational requirements: enforce bytes and body-read time before JSON materialization, bound response writes
+and total streamed/non-streamed lifetime, and sanitize forwarded identity at the trusted listener. Process-local
+source caps multiply with process count and aggregate users behind NAT; test service-wide policy. Separate cancel
+connections do not reserve native execution capacity. These bounds do not introduce a registered-key requirement.
+
 Ruling R19 of the review.

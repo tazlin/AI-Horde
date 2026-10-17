@@ -35,8 +35,9 @@ is held. How should image bytes reach the worker?
 Chosen option: "A URL signed at pop with a lifetime no shorter than the job TTL, fetched by the worker".
 
 Images are normalised and stored at submit as today. At pop the Horde signs a download URL per image and places it
-in the message part. Workers declare the transport they accept on pop; the base64 transport remains for workers that
-have not adopted the URL transport, and is retired when the worker rollout permits.
+in the message part. Workers declare the transport they accept on pop. For newly introduced chat vision, prefer a
+required URL transport. Keep base64 only if a demonstrated deployed-worker need requires it, with an explicit
+retirement gate and no object fetch while holding the queue row lock.
 
 ### Consequences
 
@@ -62,6 +63,11 @@ have not adopted the URL transport, and is retired when the worker rollout permi
 - Bad: Image bytes in Postgres, loaded on every queue scan.
 
 ## More Information
+
+Vision is deferred to beta; no image schema/transport columns are required at launch. Before enabling it,
+bound redirects, bytes, dimensions, decompression and fetch time; preserve TLS hostname verification when binding an
+address. Clean orphan uploads after validation/activation failure and crashes, not only when a request row is deleted.
+Signed URLs and worker lifetimes must be bounded; lease refresh cannot justify indefinite object access.
 
 Ruling R25 of the review. User-supplied URL ingestion at submit is a separate concern, addressed by binding the
 validated address to the connection in `horde/image.py`.

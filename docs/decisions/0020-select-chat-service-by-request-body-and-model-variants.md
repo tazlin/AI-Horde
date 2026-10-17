@@ -48,7 +48,8 @@ the base name.
 - Good: Works through `extra_body` in every SDK and through the model field in every picker.
 - Good: A prefix still serves a client that owns its model list and cannot send fields.
 - Bad: Variant names are a public vocabulary that must be documented and kept small.
-- Bad: Model names workers advertise may not contain a colon.
+- Bad: Model names workers advertise may not contain a colon. None does today, in the live model list or the text
+  model reference.
 
 ## Pros and Cons of the Options
 
@@ -72,3 +73,8 @@ the base name.
 
 This record and [ADR 0021](0021-select-chat-service-by-base-url-profiles.md) are mutually exclusive. Accepting one
 rejects the other. The design author's original direction was ADR 0021; the review ruling R1 chose this record.
+
+Alpha scope: ship only the small body object for implemented native selection and context behaviour. Variants,
+prefix aliases and additional options are deferred to beta. Alpha model ids are exact native names. The colon stays
+reserved for variants, which costs nothing while no advertised or referenced text model name contains one. Neither
+this record's full alias surface nor the competing profile resolver blocks the text-chat alpha.

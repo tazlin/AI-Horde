@@ -22,7 +22,8 @@ contract v2 the worker reports completion tokens. On what basis are chat generat
 
 - The established text pricing is a product position users and workers understand.
 - Reported token counts are claims from volunteers until audited.
-- The policy is under consideration; the code must not foreclose either outcome.
+- The alpha preserves main's native text pricing, cancellation and worker-reward dynamics.
+- Reported counts are stored so the alternative can be evaluated; storing them does not switch the policy.
 
 ## Considered Options
 
@@ -37,12 +38,18 @@ stored".
 
 Chat generations charge and reward on `max_length` exactly as text does. The basis is computed by one function per
 request type, which today returns the requested length. The reported prompt and completion counts and the basis used
-are stored on every generation and shown in the response, so the data to decide a later policy accumulates from the
-first request.
+are stored on every generation and shown in the response. They do not change the alpha charge or reward.
+
+Preserve main's activation tax and dispatched-work settlement. Undispatched choices incur no generation charge;
+cancelling dispatched work retains the native cancellation charge/reward path and its exceptions. Worker faults
+retain the separate abort/reissue semantics. Disconnects, missing output and future partial streams do not introduce
+refunds. Repeated/late submit, cancellation and cleanup must not settle the same generation twice.
 
 ### Consequences
 
-- Good: No accounting change at cutover; one function to change later.
+- Good: No pricing-policy change at cutover; calculations stay behind a small implementation boundary.
+- Bad: A later policy change also requires quotes, reservations, cancellation, reporting trust and worker-incentive
+  review. It is not a one-function operational change.
 - Bad: A short reply to a large `max_tokens` costs the full request; the default of 512 and the model list's output
   limit are the mitigation.
 
@@ -67,4 +74,5 @@ first request.
 
 This record and [ADR 0028](0028-price-chat-generations-on-reported-completion-tokens.md) are mutually exclusive.
 Accepting one rejects the other. Ruling R18 of the review chose this record as the hedge while the position is
-considered.
+considered. ADR 0028 remains the open alternative; the hedge stands until the project owner closes the fork. Characterize cancellation against a pinned main/deployment revision, including activation
+tax, reservation release and dispatched-generation cleanup, before claiming parity.

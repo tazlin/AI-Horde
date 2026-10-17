@@ -64,6 +64,9 @@ dropped, listed in `x_horde.ignored_parameters`, and the request proceeds. A cli
 
 ## More Information
 
+Alpha disposition: not selected. Strict implemented behaviour plus a small tested set of default no-ops is the alpha
+contract. Measure concrete client incompatibilities before adding lenient dropping or its settings/reporting surface.
+
 This record and [ADR 0029](0029-route-unsupported-parameters-by-declared-support-refusing-by-default.md) are
 mutually exclusive. Accepting one rejects the other. The review chose ADR 0029; this record stays as the alternative
 if friction proves too high in practice.

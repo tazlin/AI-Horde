@@ -67,3 +67,7 @@ idempotency intent. Public presets start as validated configuration; saved priva
 This record and [ADR 0020](0020-select-chat-service-by-request-body-and-model-variants.md) are mutually exclusive.
 Accepting one rejects the other. The review ruling R1 chose ADR 0020, with the static prefix table from the third
 option kept as an alias mechanism.
+
+Alpha disposition: deferred to beta. The alpha uses exact native model ids and a small body extension. No profile
+resolver, revisions, saved configurations or prefix routing are required. This alternative remains proposed rather
+than being accepted implicitly by importing the ADRs.
