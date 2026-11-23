@@ -20,9 +20,6 @@ from sqlalchemy.sql import ColumnElement, expression
 
 from horde import exceptions as e
 from horde import vars as hv
-from horde.bridge_reference import (
-    is_backed_validated,
-)
 from horde.classes.base.sql_constructs import TextArrayContainsAll
 from horde.classes.base.worker import (
     SPEED_BASELINE_THINGS_PER_SEC,
@@ -38,6 +35,7 @@ from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
 from horde.model_reference import model_reference
 from horde.utils import sanitize_string
+from horde.validated_backends import UNVALIDATED_BACKEND_REWARD_MULTIPLIER, validated_backend_registry
 
 if TYPE_CHECKING:
     from horde.classes.base.waiting_prompt import RequestEligibilityInputs
@@ -448,6 +446,11 @@ class TextWorker(Worker):
         self.refresh_softprompt_cache()
         return True
 
+    @override
+    def is_validated_backend(self) -> bool:
+        """Return whether the worker's software matches a rule of the validated backend registry."""
+        return validated_backend_registry.is_validated(self.software)
+
     def calculate_uptime_reward(self):
         model = self.get_model_names()[0]
         # The base amount of kudos one gets is based on the max context length they've loaded
@@ -459,8 +462,8 @@ class TextWorker(Worker):
         if param_multiplier < 0.25:
             param_multiplier = 0.25
         # Unvalidated backends get less kudos
-        if not is_backed_validated(self.bridge_agent):
-            base_kudos *= 0.3
+        if not self.is_validated_backend():
+            base_kudos *= UNVALIDATED_BACKEND_REWARD_MULTIPLIER
         # The uptime is based on both how much context they provide, as well as how many parameters they're serving
         return round(base_kudos * param_multiplier, 2)
 
@@ -540,7 +543,7 @@ class TextWorker(Worker):
         exceeds_base_lease = waiting_prompt.is_chat and waiting_prompt.max_length > get_text_worker_lease_capacity(self.speed)
         if exceeds_base_lease and waiting_prompt.has_capable_chat_worker():
             return EligibilitySkipReason.LEASE_SPEED
-        if waiting_prompt.validated_backends and not is_backed_validated(self.bridge_agent):
+        if waiting_prompt.validated_backends and not self.is_validated_backend():
             return EligibilitySkipReason.BRIDGE_VERSION
         # An empty softprompt always matches, because the worker can always remove its softprompt.
         lacks_requested_softprompt = bool(waiting_prompt.softprompt) and waiting_prompt.softprompt not in worker_inputs.softprompt_names
@@ -645,6 +648,7 @@ class TextWorker(Worker):
         ret_dict["accepts_chat_jobs"] = self.accepts_chat_jobs
         ret_dict["accepts_prompt_jobs"] = self.accepts_prompt_jobs
         ret_dict["chat"] = self.get_chat_details()
+        ret_dict["validated_backend"] = self.is_validated_backend()
         return ret_dict
 
     def get_chat_details(self) -> dict[str, Any] | None:

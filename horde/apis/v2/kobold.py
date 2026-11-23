@@ -1813,6 +1813,7 @@ class TextJobPop(JobPopTemplate):
             ipaddr=self.worker_ip,
             threads=self.args.threads,
             bridge_agent=self.args.bridge_agent,
+            software=self.software,
             accepts_chat_jobs=self.args.chat_jobs,
             # JSON null leaves the default, as an absent key does.
             accepts_prompt_jobs=self.args.prompt_jobs is not False,

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from horde import metrics
-from horde.bridge_reference import get_bridge_capabilities, get_supported_samplers, is_backed_validated
+from horde.bridge_reference import get_bridge_capabilities, get_supported_samplers
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger  # type: ignore[attr-defined]
 
@@ -294,6 +294,7 @@ def build_worker_scheduling_state(
     model_names: Sequence[str],
     bridge_agent: str,
     softprompt_names: Sequence[str] = (),
+    validated_backend: bool = False,
 ) -> WorkerSchedulingState:
     """Return the normalized worker state used for recent-history comparison.
 
@@ -306,6 +307,9 @@ def build_worker_scheduling_state(
         model_names: Models advertised by the worker.
         bridge_agent: Bridge identity used to resolve effective dispatch gates.
         softprompt_names: Softprompts advertised by a text worker.
+        validated_backend: Whether a text worker's software matches a validated backend rule, as
+            [`WorkerTemplate.is_validated_backend`][horde.classes.base.worker.WorkerTemplate.is_validated_backend]
+            returns it. Ignored for other request families.
 
     Returns:
         A normalized immutable scheduling state.
@@ -315,7 +319,7 @@ def build_worker_scheduling_state(
         feature_names=tuple(sorted(get_bridge_capabilities(bridge_agent))) if gentype == "image" else (),
         sampler_names=tuple(sorted(get_supported_samplers(bridge_agent, karras=False))) if gentype == "image" else (),
         karras_sampler_names=(tuple(sorted(get_supported_samplers(bridge_agent, karras=True))) if gentype == "image" else ()),
-        validated_backend=is_backed_validated(bridge_agent) if gentype == "text" else False,
+        validated_backend=validated_backend if gentype == "text" else False,
     )
     return WorkerSchedulingState(
         gentype=gentype,

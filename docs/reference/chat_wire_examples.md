@@ -1058,6 +1058,8 @@ last pop declared chat jobs with a tool temperature limit. `accepts_chat_jobs`,
   "models": ["<model-name>"],
   "team": {"name": null, "id": null},
   "bridge_agent": "<bridge-agent>",
+  "bridge": {"name": "<bridge-name>", "version": "<bridge-version>"},
+  "validated_backend": false,
   "accepts_chat_jobs": true,
   "accepts_prompt_jobs": true,
   "chat": {

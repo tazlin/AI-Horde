@@ -9,6 +9,7 @@ import horde.apis.v2.moderation as moderation
 import horde.apis.v2.stable as stable
 import horde.apis.v2.stable_styles as stable_styles
 import horde.apis.v2.styles as styles
+import horde.apis.v2.validated_backends as validated_backends
 from horde.apis.v2.base import api
 
 api.add_resource(stable.ImageAsyncGenerate, "/generate/async")
@@ -66,6 +67,8 @@ api.add_resource(moderation.OperationsModeration, "/operations/moderation")
 api.add_resource(moderation.OperationsPromptEvents, "/operations/moderation/prompts")
 api.add_resource(moderation.OperationsPromptNotes, "/operations/moderation/prompts/<int:event_id>/notes")
 api.add_resource(moderation.OperationsWorkerSuspicionEvents, "/operations/moderation/worker_suspicion_events")
+api.add_resource(validated_backends.ValidatedBackends, "/validated_backends")
+api.add_resource(validated_backends.SingleValidatedBackend, "/validated_backends/<string:rule_id>")
 api.add_resource(stable.Interrogate, "/interrogate/async")
 api.add_resource(stable.InterrogationStatus, "/interrogate/status/<string:id>")
 api.add_resource(stable.InterrogatePop, "/interrogate/pop")

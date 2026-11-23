@@ -53,6 +53,7 @@ One decision per record: what was chosen, what was rejected, and what it cost.
 | [Estimate text queue wait from the request's eligible workers](0040-estimate-text-queue-wait-from-the-eligible-workers.md) | accepted | 2026-10-28 |
 | [Enforce the speed gate for chat requests and shadow it for legacy text](0041-enforce-the-speed-gate-for-chat-requests-and-shadow-it-for-legacy-text.md) | accepted | 2026-10-30 |
 | [Keep 30 days of exact kudos history online, roll statistics up by day, and archive currency rows](0042-roll-up-statistics-and-archive-currency-after-the-online-window.md) | accepted | 2026-11-04 |
+| [Keep validated text backends in an admin registry and report worker software as structured fields](0043-keep-validated-text-backends-in-an-admin-registry.md) | proposed | 2026-11-23 |
 
 ## Relationships
 
@@ -101,6 +102,7 @@ flowchart TD
     r0040["0040: Estimate text queue wait from the req…"]
     r0041["0041: Enforce the speed gate for chat reque…"]
     r0042["0042: Keep 30 days of exact kudos history o…"]
+    r0043["0043: Keep validated text backends in an ad…"]
     r0001 --> r0003
     r0001 --> r0004
     r0001 --> r0005

@@ -260,14 +260,6 @@ BRIDGE_SAMPLERS = {  # TODO: Refactor along with schedulers
     },
 }
 
-LLM_VALIDATED_BACKENDS = {
-    "AI Horde Worker",
-    "AI Horde Worker~aphrodite~oai",
-    "AI Horde Worker~aphrodite~kai",
-    "KoboldCppEmbedWorker",
-    "TabbyAPI",
-}
-
 
 @functools.lru_cache(maxsize=256)
 @logger.catch(reraise=True)
@@ -337,11 +329,6 @@ def bridge_supports(feature: BaselineFeature, baseline: str, bridge_agent: str |
 
 
 @logger.catch(reraise=True)
-def is_backed_validated(bridge_agent: str) -> bool:
-    bridge_name, _ = parse_bridge_agent(bridge_agent)
-    return bridge_name in LLM_VALIDATED_BACKENDS
-
-
 @functools.lru_cache(maxsize=256)
 @logger.catch(reraise=True)
 def get_supported_samplers(bridge_agent: str, karras: bool = True) -> frozenset[str]:

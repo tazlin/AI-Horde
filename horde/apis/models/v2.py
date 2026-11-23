@@ -25,6 +25,7 @@ from horde.classes.base.style_contract import (
 from horde.enums import WarningMessage
 from horde.exceptions import KNOWN_RC
 from horde.vars import horde_noun, horde_title
+from horde.worker_software import BackendApi, SoftwareReportLimits
 
 
 def get_default_keys_of_model(model):
@@ -285,6 +286,23 @@ class Parsers:
             type=str,
             required=False,
             default="unknown:0:unknown",
+            location="json",
+        )
+        self.job_pop_parser.add_argument(
+            "bridge",
+            type=dict,
+            required=False,
+            help=(
+                "The bridge program that pops jobs, with its name, version and URL. When bridge and bridge_agent are both sent, "
+                "the reported software is taken from bridge."
+            ),
+            location="json",
+        )
+        self.job_pop_parser.add_argument(
+            "backend",
+            type=dict,
+            required=False,
+            help="The inference server that receives jobs from the bridge, with its name, version and API dialect. Requires bridge.",
             location="json",
         )
         self.job_pop_parser.add_argument(
@@ -831,6 +849,70 @@ class Models:
                 ),
             },
         )
+        self.input_model_bridge_report = api.model(
+            "WorkerBridge",
+            {
+                "name": fields.String(
+                    required=True,
+                    example="AI Horde Worker",
+                    description="The bridge's name, without ':' or '~'.",
+                    min_length=1,
+                    max_length=SoftwareReportLimits.MAX_NAME_LENGTH,
+                ),
+                "version": fields.String(
+                    required=True,
+                    example="25.0.0",
+                    description="The bridge's version, without ':' or '~'.",
+                    min_length=1,
+                    max_length=SoftwareReportLimits.MAX_VERSION_LENGTH,
+                ),
+                "url": fields.String(
+                    example="https://github.com/Haidra-Org/AI-Horde-Worker",
+                    description="The URL where the bridge is published.",
+                    max_length=SoftwareReportLimits.MAX_URL_LENGTH,
+                ),
+            },
+        )
+        self.input_model_backend_report = api.model(
+            "WorkerBackend",
+            {
+                "name": fields.String(
+                    required=True,
+                    example="llamacpp",
+                    description="The backend's name, without ':' or '~'.",
+                    min_length=1,
+                    max_length=SoftwareReportLimits.MAX_NAME_LENGTH,
+                ),
+                "version": fields.String(
+                    example="0.3.2",
+                    description="The backend's version, without ':' or '~'. Leave it out when the version is unknown.",
+                    max_length=SoftwareReportLimits.MAX_VERSION_LENGTH,
+                ),
+                "api": fields.String(
+                    example="openai",
+                    description=(
+                        f"The API dialect used between the bridge and the backend: {', '.join(api_name.value for api_name in BackendApi)}. "
+                        "Unknown names are ignored."
+                    ),
+                    max_length=SoftwareReportLimits.MAX_NAME_LENGTH,
+                ),
+            },
+        )
+        self.response_model_worker_bridge = api.model(
+            "WorkerBridgeDetails",
+            {
+                "name": fields.String(description="The name of the bridge reported by the worker, or 'unknown'."),
+                "version": fields.String(description="The reported bridge version."),
+            },
+        )
+        self.response_model_worker_backend = api.model(
+            "WorkerBackendDetails",
+            {
+                "name": fields.String(description="The name of the backend reported by the worker."),
+                "version": fields.String(description="The reported backend version."),
+                "api": fields.String(description="The reported API dialect between the bridge and the backend."),
+            },
+        )
         self.input_model_job_pop = api.model(
             "PopInput",
             {
@@ -853,8 +935,26 @@ class Models:
                     required=False,
                     default="unknown:0:unknown",
                     example=f"{horde_title} Worker reGen:4.1.0:https://github.com/Haidra-Org/horde-worker-reGen",
-                    description="The worker name, version and website.",
+                    description=(
+                        "The worker name, version and website, as name:version:url. This is the legacy format. Send "
+                        "bridge and backend instead."
+                    ),
                     max_length=1000,
+                ),
+                "bridge": fields.Nested(
+                    self.input_model_bridge_report,
+                    allow_null=True,
+                    description=(
+                        "The bridge program that pops jobs. When sent, the reported software is taken from it instead of bridge_agent."
+                    ),
+                ),
+                "backend": fields.Nested(
+                    self.input_model_backend_report,
+                    allow_null=True,
+                    description=(
+                        "The inference server that receives jobs from the bridge. Requires bridge. Leave it out when "
+                        "the bridge is built into its backend."
+                    ),
                 ),
                 "threads": fields.Integer(
                     default=1,
@@ -1113,6 +1213,24 @@ class Models:
                     description="The maximum tokens this worker can read.",
                 ),
                 "tokens_generated": fields.Float(description="How many tokens this worker has generated until now."),
+                "bridge": fields.Nested(
+                    self.response_model_worker_bridge,
+                    description="The bridge reported by the worker on its last pop.",
+                ),
+                "backend": fields.Nested(
+                    self.response_model_worker_backend,
+                    default=None,
+                    allow_null=True,
+                    description="The backend reported by the worker on its last pop, or null when the worker did not report one.",
+                ),
+                "validated_backend": fields.Boolean(
+                    default=None,
+                    description=(
+                        "(Text workers) Whether the reported software matches a rule of the validated backend registry. "
+                        "A text worker that does not match any rule does not receive requests with validated_backends "
+                        "set, and earns reduced kudos."
+                    ),
+                ),
                 "messages": fields.List(fields.Nested(self.response_model_message_full, skip_none=True)),
             },
         )

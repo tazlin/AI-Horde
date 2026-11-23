@@ -29,5 +29,6 @@ The concepts they assume (what a worker is, what a job's lifecycle means) are in
 | [Chat wire examples](chat_wire_examples.md) | Checked JSON examples for native chat requests, OpenAI-compatible responses and worker pop, progress and submit routes. |
 | [Request scheduling telemetry and forecasts](request_scheduling.md) | Assignment-pressure inputs, availability telemetry, shadow forecast retention and validation criteria for server maintainers. |
 | [Chat front reference](chat_front.md) | Routes, settings, OpenAI-compatible request and response formats, stream behavior, availability errors and telemetry of the horde.oai service. |
+| [Worker software and validated backends](worker_software.md) | Bridge and backend fields reported by workers on a pop, including the legacy bridge_agent string, and the admin registry of rules for validated text backends. |
 | [Outbound requests reference](outbound_requests.md) | Which client-supplied URLs the horde requests, the address check every hop passes, and the timeouts, redirect limits and byte caps of image fetches and webhooks. |
 <!-- END GENERATED: documents -->

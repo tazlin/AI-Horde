@@ -61,6 +61,7 @@ def _seed_core_rows() -> None:
     from horde.classes.base.kudos import KudosLedgerControl
     from horde.classes.base.settings import HordeSettings
     from horde.classes.base.user import User
+    from horde.database.validated_backends import seed_validated_backends
     from horde.enums import KudosLedgerMode
     from horde.flask import db
     from horde.utils import hash_api_key
@@ -86,6 +87,9 @@ def _seed_core_rows() -> None:
         db.session.add(KudosLedgerControl(id=1, mode=str(KudosLedgerMode.LEDGER)))
 
     db.session.commit()
+    # Each test module has a separate schema, so the seed rules are stored here. Seeding also invalidates the
+    # process-local rule snapshot, which still holds the rules of the previous module.
+    seed_validated_backends()
 
 
 @pytest.fixture(scope="module")

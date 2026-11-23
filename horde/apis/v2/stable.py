@@ -864,6 +864,7 @@ class ImageJobPop(JobPopTemplate):
             ipaddr=self.worker_ip,
             threads=self.args.threads,
             bridge_agent=self.args.bridge_agent,
+            software=self.software,
             allow_img2img=self.args.allow_img2img,
             allow_painting=self.args.allow_painting,
             allow_unsafe_ipaddr=self.args.allow_unsafe_ipaddr,
@@ -1349,6 +1350,8 @@ class InterrogatePop(JobPopTemplate):
         default="unknown:0:unknown",
         location="json",
     )
+    post_parser.add_argument("bridge", type=dict, required=False, location="json")
+    post_parser.add_argument("backend", type=dict, required=False, location="json")
     post_parser.add_argument(
         "threads",
         type=int,
@@ -1508,6 +1511,7 @@ class InterrogatePop(JobPopTemplate):
             ipaddr=self.worker_ip,
             threads=self.args.threads,
             bridge_agent=self.args.bridge_agent,
+            software=self.software,
             priority_usernames=self.priority_usernames,
         )
 

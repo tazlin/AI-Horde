@@ -786,6 +786,7 @@ class WaitingPrompt(db.Model):
                         model_names=model_names,
                         bridge_agent=worker.bridge_agent,
                         softprompt_names=softprompt_names,
+                        validated_backend=worker.is_validated_backend(),
                     ),
                     request_id=str(self.id),
                     request_created_at=self.created,

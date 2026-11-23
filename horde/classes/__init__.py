@@ -5,9 +5,11 @@
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import inspect
 from sqlalchemy.sql import text
 
 import horde.classes.base.stats  # noqa 401
+import horde.database.validated_backends as validated_backend_store
 from horde.argparser import args
 from horde.classes.base.detection import Filter  # noqa 401
 from horde.classes.base.kudos import (  # noqa 401
@@ -28,6 +30,7 @@ from horde.classes.base.settings import HordeSettings
 from horde.classes.base.style import Style
 from horde.classes.base.team import Team  # noqa 401
 from horde.classes.base.user import User
+from horde.classes.base.validated_backend import ValidatedBackend
 from horde.classes.base.worker import WorkerSuspicionEvent  # noqa 401
 
 # noqa 401
@@ -63,6 +66,10 @@ def init_db(app):
     with app.app_context(), db.engine.connect() as lock_conn:
         lock_conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _INIT_DB_LOCK_KEY})
 
+        # The validated backend registry is seeded with the legacy rules only when this startup creates the table, so a
+        # rule deleted by an admin stays deleted. A database migrated with sql_statements/6.1.0.txt already has the
+        # table and the seed rows.
+        validated_backends_table_existed = inspect(db.engine).has_table(ValidatedBackend.__tablename__)
         db.create_all()
         ensure_kudos_event_partitions(
             until=datetime.utcnow() + 2 * KudosPartitioning.DEFAULT_WIDTH,
@@ -115,6 +122,8 @@ def init_db(app):
             settings = HordeSettings()
             db.session.add(settings)
             db.session.commit()
+        if not validated_backends_table_existed:
+            validated_backend_store.seed_validated_backends()
 
 
 __all__ = [
@@ -133,4 +142,5 @@ __all__ = [
     "Filter",
     "stats",
     "Style",
+    "ValidatedBackend",
 ]

@@ -34,6 +34,7 @@ from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
 from horde.suspicions import SUSPICION_LOGS, Suspicions
 from horde.utils import get_db_uuid, get_message_expiry_date, is_profane, sanitize_string
+from horde.worker_software import SoftwareReportLimits, WorkerSoftware, parse_backend_api, parse_legacy_bridge_agent
 
 if TYPE_CHECKING:
     from horde.classes.base.user import User
@@ -66,6 +67,11 @@ WORKER_ONLINE_SECONDS: int = 300
 
 ``WorkerTemplate.is_stale`` and the moderator overview's online filter both read it, so the two agree.
 """
+
+
+def _cut_optional(value: str | None, max_length: int) -> str | None:
+    """Return a value truncated to a column length, or None when the value is None."""
+    return value[:max_length] if value is not None else None
 
 
 class WorkerStats(db.Model):
@@ -395,6 +401,17 @@ class WorkerTemplate(db.Model):
     uptime = db.Column(db.BigInteger, default=0, nullable=False)
     threads = db.Column(db.Integer, default=1, nullable=False)
     bridge_agent = db.Column(db.Text, default="unknown:0:unknown", nullable=False, index=True)
+    bridge_name: Mapped[str | None] = db.Column(db.String(SoftwareReportLimits.MAX_NAME_LENGTH), nullable=True)
+    """The bridge reported by the worker on its last pop, or None for a row stored before the software columns were
+    added."""
+    bridge_version: Mapped[str | None] = db.Column(db.String(SoftwareReportLimits.MAX_VERSION_LENGTH), nullable=True)
+    """The reported bridge version."""
+    backend_name: Mapped[str | None] = db.Column(db.String(SoftwareReportLimits.MAX_NAME_LENGTH), nullable=True)
+    """The reported backend, or None when the worker does not report a backend separate from its bridge."""
+    backend_version: Mapped[str | None] = db.Column(db.String(SoftwareReportLimits.MAX_VERSION_LENGTH), nullable=True)
+    """The reported backend version."""
+    backend_api: Mapped[str | None] = db.Column(db.String(SoftwareReportLimits.MAX_API_LENGTH), nullable=True)
+    """The reported API dialect between the bridge and the backend, a ``BackendApi`` value."""
     last_reward_uptime = db.Column(db.BigInteger, default=0, nullable=False)
     # Used by all workers to record how much they can pick up to generate
     # The value of this column is dfferent per worker type
@@ -641,6 +658,8 @@ class WorkerTemplate(db.Model):
         self.require_upfront_kudos = kwargs.get("require_upfront_kudos", False)
         self.prioritized_users = kwargs.get("priority_usernames", [])
         self.bridge_agent = sanitize_string(kwargs.get("bridge_agent", "unknown:0:unknown"))
+        reported_software: WorkerSoftware | None = kwargs.get("software")
+        self.set_software(reported_software if reported_software is not None else parse_legacy_bridge_agent(self.bridge_agent))
         self.threads = kwargs.get("threads", 1)
         self.allow_unsafe_ipaddr = kwargs.get("allow_unsafe_ipaddr", True)
         now = datetime.utcnow()
@@ -673,6 +692,56 @@ class WorkerTemplate(db.Model):
             self.last_reward_uptime = self.uptime
         self.last_check_in = now
         return True
+
+    @property
+    def software(self) -> WorkerSoftware:
+        """The bridge and backend reported by the worker, parsed from ``bridge_agent`` for a row stored before the software
+        columns were added."""
+        if self.bridge_name is None:
+            return parse_legacy_bridge_agent(self.bridge_agent)
+        return WorkerSoftware(
+            bridge_name=self.bridge_name,
+            bridge_version=self.bridge_version,
+            backend_name=self.backend_name,
+            backend_version=self.backend_version,
+            backend_api=parse_backend_api(self.backend_api),
+        )
+
+    def set_software(self, software: WorkerSoftware) -> None:
+        """Mutate the software columns to match a pop's report, truncated to the column lengths.
+
+        A structured report is validated to fit the columns before this call. A legacy ``bridge_agent`` is not
+        validated, so its parts are truncated here. SQLAlchemy does not issue an UPDATE for unchanged values, so
+        repeated pops with the same software do not add writes.
+
+        Args:
+            software: The software resolved from the pop.
+        """
+        self.bridge_name = software.bridge_name[: SoftwareReportLimits.MAX_NAME_LENGTH]
+        self.bridge_version = _cut_optional(software.bridge_version, SoftwareReportLimits.MAX_VERSION_LENGTH)
+        self.backend_name = _cut_optional(software.backend_name, SoftwareReportLimits.MAX_NAME_LENGTH)
+        self.backend_version = _cut_optional(software.backend_version, SoftwareReportLimits.MAX_VERSION_LENGTH)
+        self.backend_api = software.backend_api.value if software.backend_api is not None else None
+
+    def is_validated_backend(self) -> bool:
+        """Return whether the worker's software matches a validated backend rule.
+
+        Only text workers are checked. For other worker types, this returns False.
+        """
+        return False
+
+    def get_software_details(self) -> dict[str, Any]:
+        """Return the reported bridge and backend as the ``bridge`` and ``backend`` fields of the worker details."""
+        software = self.software
+        bridge_details = {"name": software.bridge_name, "version": software.bridge_version}
+        if software.backend_name is None:
+            return {"bridge": bridge_details, "backend": None}
+        backend_details = {
+            "name": software.backend_name,
+            "version": software.backend_version,
+            "api": software.backend_api.value if software.backend_api is not None else None,
+        }
+        return {"bridge": bridge_details, "backend": backend_details}
 
     def get_human_readable_uptime(self):
         if self.uptime < 60:
@@ -933,6 +1002,7 @@ class WorkerTemplate(db.Model):
             "online": not self.is_stale(),
             "team": {"id": str(self.team.id), "name": self.team.name} if self.team else "None",
             "bridge_agent": self.bridge_agent,
+            **self.get_software_details(),
         }
         if details_privilege >= 2:
             ret_dict["paused"] = self.paused

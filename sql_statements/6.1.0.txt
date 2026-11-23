@@ -1,0 +1,52 @@
+-- Validated backend registry (ADR 43): the admin-maintained rules that replace the hard-coded LLM_VALIDATED_BACKENDS
+-- set, and the columns that store the bridge and backend reported by each worker.
+--
+-- Every statement is idempotent and does not need psql, so the file can run in one transaction. Apply it before
+-- deploying the application that reads the registry. On a fresh database db.create_all() creates the table and
+-- init_db stores the seed rules, so the file is only needed for an existing database, where create_all() does not
+-- add columns to the workers table.
+
+
+-- 1. The software reported by each worker. For a row whose bridge_name is NULL, the software is read from bridge_agent
+-- until the worker's next pop.
+
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS bridge_name VARCHAR(100);
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS bridge_version VARCHAR(64);
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS backend_name VARCHAR(100);
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS backend_version VARCHAR(64);
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS backend_api VARCHAR(16);
+
+
+-- 2. The registry table, matching the model in horde/classes/base/validated_backend.py.
+
+CREATE TABLE IF NOT EXISTS validated_backends (
+    id UUID NOT NULL PRIMARY KEY,
+    bridge_name VARCHAR(100) NOT NULL,
+    backend_name VARCHAR(100),
+    min_bridge_version VARCHAR(64),
+    min_backend_version VARCHAR(64),
+    description VARCHAR(500),
+    created_by_user_id INTEGER,
+    created TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+    updated TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT (now() AT TIME ZONE 'utc')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_validated_backends_identity
+    ON validated_backends (lower(bridge_name), lower(COALESCE(backend_name, '')));
+
+
+-- 3. The seed rules, equivalent to the five entries of LLM_VALIDATED_BACKENDS. The two aphrodite entries are one rule,
+-- since the API dialect is reported beside the backend. An existing rule with the same bridge and backend is left
+-- unchanged.
+
+INSERT INTO validated_backends (id, bridge_name, backend_name, description)
+VALUES
+    (gen_random_uuid(), 'AI Horde Worker', NULL,
+     'Seeded from LLM_VALIDATED_BACKENDS: the AI Horde Worker scribe before it reported a backend.'),
+    (gen_random_uuid(), 'AI Horde Worker', 'aphrodite',
+     'Seeded from LLM_VALIDATED_BACKENDS: aphrodite-engine through its OpenAI or KoboldAI API.'),
+    (gen_random_uuid(), 'KoboldCppEmbedWorker', NULL,
+     'Seeded from LLM_VALIDATED_BACKENDS: koboldcpp''s embedded worker.'),
+    (gen_random_uuid(), 'TabbyAPI', NULL,
+     'Seeded from LLM_VALIDATED_BACKENDS: TabbyAPI''s embedded worker.')
+ON CONFLICT (lower(bridge_name), lower(COALESCE(backend_name, ''))) DO NOTHING;

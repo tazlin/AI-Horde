@@ -9,13 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, func, or_
+from sqlalchemy import ColumnElement, and_, false, func, or_, true
 from sqlalchemy.orm import aliased, joinedload, noload, selectinload, with_expression
 
 import horde.classes.base.stats as stats
-from horde.bridge_reference import (
-    is_backed_validated,
-)
 from horde.classes.base.waiting_prompt import WPAllowedWorkers, WPModels
 from horde.classes.base.worker import WorkerPerformance
 from horde.classes.kobold.processing_generation import TextProcessingGeneration
@@ -188,7 +185,7 @@ def text_wp_offer_clauses(worker, models_list):
             TextWaitingPrompt.user_id == worker.user_id,
         ),
         or_(
-            is_backed_validated(worker.bridge_agent),
+            true() if worker.is_validated_backend() else false(),
             TextWaitingPrompt.validated_backends.is_(False),
         ),
     ]

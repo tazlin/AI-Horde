@@ -1147,6 +1147,18 @@ class ImageModels(v2.Models):
                     description="The worker name, version and website.",
                     max_length=1000,
                 ),
+                "bridge": fields.Nested(
+                    self.input_model_bridge_report,
+                    allow_null=True,
+                    description=(
+                        "The bridge program that pops jobs. When sent, the reported software is taken from it instead of bridge_agent."
+                    ),
+                ),
+                "backend": fields.Nested(
+                    self.input_model_backend_report,
+                    allow_null=True,
+                    description="The inference server that receives jobs from the bridge. Requires bridge.",
+                ),
                 "threads": fields.Integer(
                     default=1,
                     description=(

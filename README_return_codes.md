@@ -241,3 +241,7 @@ The errors returned by the AI horde are always in this json format
 | ChatProgressUnavailable | A chat job's progress post could not be stored because Redis could not be reached (HTTP 503) |
 | ChatJobAborted | A chat job's progress post named a generation without a lease that is faulted, as after its lease lapsed or its request was cancelled, or not stored, as after its request expired (HTTP 404); the worker stops generating and does not submit |
 | UserNotDeleted | The user is not deleted and cannot be undeleted |
+| WorkerSoftwareInvalid | A pop's `bridge` or `backend` object is malformed, or the pop sends `backend` without `bridge` |
+| ValidatedBackendExists | A validated backend rule for the same bridge and backend already exists |
+| ValidatedBackendInvalid | A validated backend rule's body has a missing, malformed or unknown field |
+| ValidatedBackendNotFound | The id is not a UUID or does not match any validated backend rule (HTTP 404) |

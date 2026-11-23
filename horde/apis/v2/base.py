@@ -19,6 +19,7 @@ from flask_restx import Namespace, Resource, inputs, marshal_with, reqparse
 from flask_restx.reqparse import ParseResult
 from markdownify import markdownify
 from opentelemetry import trace
+from pydantic import ValidationError
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm.exc import StaleDataError
@@ -104,6 +105,14 @@ from horde.suspicions import Suspicions
 from horde.telemetry import pyroscope_tag
 from horde.utils import datetime_parser, hash_api_key, hash_dictionary, is_profane, sanitize_string
 from horde.vars import horde_contact_email, horde_repository, horde_title, horde_url
+from horde.worker_software import (
+    LEGACY_DEFAULT_BRIDGE_AGENT,
+    BackendReport,
+    BridgeReport,
+    WorkerSoftware,
+    build_bridge_agent,
+    resolve_reported_software,
+)
 
 # Not used yet
 authorizations = {"apikey": {"type": "apiKey", "in": "header", "name": "apikey"}}
@@ -237,6 +246,29 @@ def check_for_mod(api_key, operation, whitelisted_users=None):
             return mod
         raise e.NotModerator(mod.get_unique_alias(), operation)
     return mod
+
+
+def check_for_admin(api_key: str, operation: str) -> User:
+    """Return the user with an API key, after checking that the user is listed in the ``ADMINS`` environment variable.
+
+    Args:
+        api_key: The request's ``apikey`` header.
+        operation: The endpoint and method, included in the error when the check fails.
+
+    Returns:
+        The admin user.
+
+    Raises:
+        horde.exceptions.InvalidAPIKey: The key does not belong to any user.
+        horde.exceptions.NotAdmin: The user is not listed in ``ADMINS``.
+    """
+    admin = database.find_user_by_api_key(api_key)
+    if not admin:
+        raise e.InvalidAPIKey("Admin action: " + operation)
+    admin_aliases = json.loads(os.getenv("ADMINS") or "[]")
+    if admin.get_unique_alias() not in admin_aliases:
+        raise e.NotAdmin(admin.get_unique_alias(), operation)
+    return admin
 
 
 # I have to put it outside the class as I can't figure out how to extend the argparser
@@ -1104,6 +1136,9 @@ class JobPopTemplate(Resource):
     them from the caches. See [`StoredWorkerDeclaration`][horde.classes.base.worker.StoredWorkerDeclaration]."""
     scan_page_sizes: tuple[int, ...] = database.POP_SCAN_PAGE_SIZES
     """How many requests each page of the pop's queue scan reads, in page order. The last size repeats."""
+    software: WorkerSoftware | None = None
+    """The bridge and backend reported by the pop, resolved by
+    [`resolve_software`][horde.apis.v2.base.JobPopTemplate.resolve_software]."""
 
     def post(self):
         t0 = time.monotonic()
@@ -1403,9 +1438,49 @@ class JobPopTemplate(Resource):
             ipaddr=self.worker_ip,
         )
 
+    def resolve_software(self) -> None:
+        """Mutate ``software`` to the software reported by the pop, from the structured ``bridge`` and ``backend``
+        arguments or the legacy ``bridge_agent``.
+
+        When the pop sends ``bridge`` and its ``bridge_agent`` is missing, empty or the default, ``bridge_agent`` is
+        built from the bridge, so code that reads the string still works.
+
+        Raises:
+            horde.exceptions.BadRequest: With the ``WorkerSoftwareInvalid`` return code when ``bridge`` or ``backend``
+                is malformed, or ``backend`` is sent without ``bridge``.
+        """
+        raw_bridge = self.args.get("bridge")
+        raw_backend = self.args.get("backend")
+        if raw_backend is not None and raw_bridge is None:
+            raise e.BadRequest("A pop that sends backend must also send bridge.", rc="WorkerSoftwareInvalid")
+        try:
+            bridge = BridgeReport.model_validate(raw_bridge) if raw_bridge is not None else None
+            backend = BackendReport.model_validate(raw_backend) if raw_backend is not None else None
+        except ValidationError as validation_error:
+            refused_fields = "; ".join(
+                f"{'.'.join(str(location) for location in error['loc'])}: {error['msg']}" for error in validation_error.errors()
+            )
+            raise e.BadRequest(
+                f"The reported worker software is invalid: {refused_fields}",
+                rc="WorkerSoftwareInvalid",
+            ) from validation_error
+        if bridge is not None and self.args.get("bridge_agent") in (None, "", LEGACY_DEFAULT_BRIDGE_AGENT):
+            self.args["bridge_agent"] = build_bridge_agent(bridge)
+        self.software = resolve_reported_software(bridge_agent=self.args.get("bridge_agent"), bridge=bridge, backend=backend)
+
+    def is_reported_software_profane(self) -> bool:
+        """Return whether the ``bridge_agent`` or a structured bridge or backend name is profane."""
+        if is_profane(self.args.get("bridge_agent") or ""):
+            return True
+        if self.args.get("bridge") is None or self.software is None:
+            return False
+        reported_names = " ".join(name for name in (self.software.bridge_name, self.software.backend_name) if name)
+        return is_profane(reported_names)
+
     # We split this into its own function, so that it may be overriden and extended
     def validate(self):
         self.skipped = {}
+        self.resolve_software()
         self.user = database.find_user_by_api_key(self.args["apikey"])
         if not self.user:
             raise e.InvalidAPIKey("prompt pop")
@@ -1444,7 +1519,7 @@ class JobPopTemplate(Resource):
             # limit who keeps popping with new names does not cost a prediction per pop.
             if is_profane(self.worker_name):
                 raise e.Profanity(self.user.get_unique_alias(), self.worker_name, "worker name", rc="ProfaneWorkerName")
-            if is_profane(self.args.bridge_agent):
+            if self.is_reported_software_profane():
                 raise e.Profanity(self.user.get_unique_alias(), self.args.bridge_agent, "bridge agent", rc="ProfaneBridgeAgent")
             self.worker = self.register_worker()
             # The registration can return a worker that a concurrent pop registered with its declaration, so the

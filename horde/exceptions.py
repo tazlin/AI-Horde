@@ -232,6 +232,10 @@ KNOWN_RC = [
     "ChatProgressUnavailable",
     "ChatJobAborted",
     "NoEligibleWorker",
+    "WorkerSoftwareInvalid",
+    "ValidatedBackendExists",
+    "ValidatedBackendInvalid",
+    "ValidatedBackendNotFound",
 ]
 
 

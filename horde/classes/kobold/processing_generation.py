@@ -17,7 +17,6 @@ from sqlalchemy.sql import expression
 from horde import metrics
 from horde import vars as hv
 from horde.bridge_reference import (
-    is_backed_validated,
     parse_bridge_agent,
 )
 from horde.chat_progress import (
@@ -62,6 +61,7 @@ from horde.metrics import (
 )
 from horde.model_reference import model_reference
 from horde.suspicions import Suspicions
+from horde.validated_backends import UNVALIDATED_BACKEND_REWARD_MULTIPLIER
 
 _fault_event_logger = get_logger(__name__)
 
@@ -548,8 +548,8 @@ class TextProcessingGeneration(ProcessingGeneration):
         parameter_bonus = (max(model_multiplier, 13) / 13) ** 0.20
         kudos = self.get_things_count() * parameter_bonus * model_multiplier / 125
         # Unvalidated backends have their rewards cut to 30%
-        if not is_backed_validated(self.worker.bridge_agent):
-            kudos *= 0.3
+        if not self.worker.is_validated_backend():
+            kudos *= UNVALIDATED_BACKEND_REWARD_MULTIPLIER
         return round(kudos * context_multiplier, 2)
 
     def log_worker_abort(self) -> None:

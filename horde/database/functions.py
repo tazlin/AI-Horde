@@ -3092,6 +3092,7 @@ def _measure_request_assignment_pressure(
                 model_names=eligible_worker.eligibility_inputs.model_names,
                 bridge_agent=eligible_worker.worker.bridge_agent,
                 softprompt_names=eligible_worker.eligibility_inputs.softprompt_names,
+                validated_backend=eligible_worker.worker.is_validated_backend(),
             ),
         )
         for eligible_worker in eligible_workers

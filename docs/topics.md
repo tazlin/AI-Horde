@@ -87,6 +87,7 @@ procedure for one subject sit together.
 - Reference: [Moderation operations reference](reference/moderation_operations.md)
 - Reference: [Request scheduling telemetry and forecasts](reference/request_scheduling.md)
 - Reference: [Chat front reference](reference/chat_front.md)
+- Reference: [Worker software and validated backends](reference/worker_software.md)
 - Reference: [Outbound requests reference](reference/outbound_requests.md)
 
 ### requests
@@ -109,6 +110,7 @@ procedure for one subject sit together.
 - Reference: [Chat wire examples](reference/chat_wire_examples.md)
 - Reference: [Request scheduling telemetry and forecasts](reference/request_scheduling.md)
 - Reference: [Chat front reference](reference/chat_front.md)
+- Reference: [Worker software and validated backends](reference/worker_software.md)
 - Reference: [Outbound requests reference](reference/outbound_requests.md)
 - Tutorial: [Your first chat completion through the Horde](tutorial/first_chat_completion.md)
 
@@ -126,5 +128,6 @@ procedure for one subject sit together.
 - Reference: [Chat requests reference](reference/chat_requests.md)
 - Reference: [Chat wire examples](reference/chat_wire_examples.md)
 - Reference: [Request scheduling telemetry and forecasts](reference/request_scheduling.md)
+- Reference: [Worker software and validated backends](reference/worker_software.md)
 - Tutorial: [Serve your first chat job with koboldcpp](tutorial/first_chat_worker.md)
 <!-- END GENERATED: topics -->
