@@ -7,9 +7,9 @@ import os
 import time
 import urllib.parse
 import uuid
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -33,6 +33,7 @@ from horde.classes.base.style import Style, StyleCollection, StyleModel, StyleTa
 from horde.classes.base.user import KudosTransferLog, User, UserRecords, UserSharedKey
 from horde.classes.base.waiting_prompt import WaitingPrompt, WPAllowedWorkers, WPModels, WPTrickedWorkers
 from horde.classes.base.worker import (
+    WORKER_ONLINE_SECONDS,
     StoredWorkerDeclaration,
     Worker,
     WorkerEligibilityInputs,
@@ -70,6 +71,7 @@ from horde.database.kudos_legacy_projection import consume_user_reservation
 from horde.database.kudos_reservations import reserve_kudos
 from horde.enums import KudosAuditDetail, KudosEntryType, KudosIdempotencyKind, State
 from horde.flask import SQLITE_MODE, db
+from horde.horde_redis import LOCAL_CACHE_MAX_LIFETIME
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
 from horde.metrics import (
@@ -77,6 +79,7 @@ from horde.metrics import (
     pop_query_duration,
     record_request_assignment_pressure,
     worker_availability_cache_lookups,
+    worker_list_snapshot_misses,
 )
 from horde.model_reference import model_reference
 from horde.request_scheduling import (
@@ -89,7 +92,8 @@ from horde.request_scheduling import (
     build_worker_scheduling_state,
     get_request_assignment_pressure,
 )
-from horde.utils import hash_api_key, validate_regex
+from horde.utils import datetime_parser, hash_api_key, validate_regex
+from horde.worker_pages import WorkerListSort, WorkerListView, WorkerPageCursor, WorkerPageFilters
 
 ALLOW_ANONYMOUS = True
 type KudosTransferResult = list[int | float | str | bool | None]
@@ -373,21 +377,210 @@ def get_highest_text_worker_limits(
 
 
 def get_active_workers_for_details() -> list[WorkerTemplate]:
-    """Return every active worker with everything ``get_details()`` reads already loaded.
+    """Return every active worker, with every relationship read by ``get_details()`` already loaded.
 
-    Use this instead of ``get_active_workers()`` whenever the result is serialized in bulk (the worker list cache,
-    the ``/v2/workers`` fallback). ``get_details(2)`` reads the owner, the owner's roles, the team, messages, kudos
-    stats and the advertised models (or forms, annotation types and performance records for interrogation
-    workers). Loaded lazily, that is one SELECT per relationship per worker, each a database round-trip. Loaded with
-    ``selectinload`` it is one SELECT per relationship per worker type regardless of how many workers are active.
+    Use this instead of ``get_active_workers()`` whenever the result is serialized in bulk, as in the worker list
+    snapshot and its fallback.
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=300)
+    return _query_workers_for_details(lambda worker_class: worker_class.last_check_in > cutoff)
+
+
+_LISTED_WORKER_CLASSES: tuple[type[WorkerTemplate], ...] = (ImageWorker, TextWorker, InterrogationWorker)
+"""The worker classes included in the worker lists. Their rows share the ``workers`` table."""
+
+
+@dataclass(frozen=True)
+class RegisteredWorkerPage:
+    """Represents one page of registered workers, read from the database."""
+
+    workers: list[WorkerTemplate]
+    """The page's workers in the requested order, with every relationship read by ``get_details()`` loaded."""
+    next_cursor: WorkerPageCursor | None
+    """The position after the page's last worker, or None on the last page."""
+    total: int
+    """How many registered workers pass the filters, across all pages."""
+
+
+def page_registered_workers(
+    *,
+    filters: WorkerPageFilters,
+    sort: WorkerListSort,
+    limit: int,
+    after: WorkerPageCursor | None,
+    view: WorkerListView,
+    account_id: int | None = None,
+) -> RegisteredWorkerPage:
+    """Return one page of registered workers, active or not, with a keyset query.
+
+    The first statement selects the IDs and sort values of at most ``limit + 1`` workers after ``after``, ordered by
+    the sort column and then by ID, and counts every worker that passes the filters. The extra row shows whether
+    another page follows. The page's workers are then loaded with ``_query_workers_for_details``, so the number of
+    statements does not depend on ``limit``. A worker deleted between the two statements is left out of the page.
+
+    Args:
+        filters: The filters in the request.
+        sort: The order of the page.
+        limit: The most workers to return. The caller has already checked it against the limits.
+        after: The cursor of the previous page, or None for the first page.
+        view: The caller's view. In the public view, an owner filter matches only the workers of owners who made
+            their workers public.
+        account_id: Only workers of this account, for the owner's list. With None, the page includes the workers of
+            every account.
+    """
+    conditions = _registered_worker_conditions(filters, view, account_id)
+    sort_column = _worker_sort_column(sort)
+    # The CTE holds the ID and the sort value of every worker that passes the filters. The statement reads it twice,
+    # once for the count and once for the page. PostgreSQL 12 and later materializes a CTE that is referenced more
+    # than once, so one scan of ``workers`` serves both reads. The sort columns are not indexed, so each separate read
+    # of the table would be a full scan.
+    filtered_workers = (
+        select(
+            WorkerTemplate.id.label("id"),
+            sort_column.label("sort_value"),
+        )
+        .where(*conditions)
+        .cte("filtered_workers")
+    )
+    # The count does not depend on the cursor, so every page of a walk reports the size of the whole filtered list.
+    # The subquery is not correlated with the page rows, so the database computes it once and repeats it on each row.
+    total_count = select(func.count()).select_from(filtered_workers).scalar_subquery()
+    page_query = select(
+        filtered_workers.c.id,
+        filtered_workers.c.sort_value,
+        total_count.label("total"),
+    )
+    if after is not None:
+        page_query = page_query.where(
+            _after_cursor_condition(filtered_workers.c.sort_value, filtered_workers.c.id, sort, after),
+        )
+    ordering = filtered_workers.c.sort_value.desc() if sort.descending else filtered_workers.c.sort_value.asc()
+    # The ID breaks ties, so no two workers share a position and a cursor points to exactly one of them. The row past
+    # the limit shows whether another page follows.
+    page_query = page_query.order_by(ordering, filtered_workers.c.id.asc()).limit(limit + 1)
+    # Worked example: workers A (uptime 900), B (uptime 300) and C (uptime 300) pass the filters, B's ID sorts before
+    # C's, and the limit is 1. The first page returns the rows (A, 900, 3) and (B, 300, 3). A is the page, and B shows
+    # that another page follows, so the cursor holds (900, A). The page after that cursor returns (B, 300, 3) and
+    # (C, 300, 3), so the cursor holds (300, B). The page after (300, B) returns only (C, 300, 3) and is the last
+    # page. If C is deleted before that read, the page returns no rows and no count.
+    id_rows = db.session.execute(page_query).all()
+    if id_rows:
+        total = id_rows[0].total
+    elif after is None:
+        # Without a cursor, a page with no rows means that no worker passes the filters.
+        total = 0
+    else:
+        # A cursor past the end returns no rows and therefore no count. An issued cursor points past the end only when
+        # every worker after it was deleted or left the filters since the previous page, so the second scan is rare.
+        total = db.session.execute(select(func.count()).select_from(filtered_workers)).scalar_one()
+    page_rows = id_rows[:limit]
+    page_ids = [row.id for row in page_rows]
+    workers_by_id: dict[Any, WorkerTemplate] = {}
+    if page_ids:
+        loaded_workers = _query_workers_for_details(lambda worker_class: worker_class.id.in_(page_ids))
+        workers_by_id = {worker.id: worker for worker in loaded_workers}
+    next_cursor = None
+    if len(id_rows) > limit:
+        last_row = page_rows[-1]
+        next_cursor = WorkerPageCursor(sort=sort, sort_value=last_row.sort_value, worker_id=str(last_row.id))
+    return RegisteredWorkerPage(
+        workers=[workers_by_id[worker_id] for worker_id in page_ids if worker_id in workers_by_id],
+        next_cursor=next_cursor,
+        total=total,
+    )
+
+
+def _worker_sort_column(sort: WorkerListSort) -> ColumnElement[Any]:
+    """Return the column expression of the ``workers`` table that ``sort`` orders by."""
+    if sort is WorkerListSort.NAME:
+        return func.lower(WorkerTemplate.name)
+    if sort is WorkerListSort.REQUESTS_FULFILLED:
+        return WorkerTemplate.fulfilments
+    if sort is WorkerListSort.KUDOS_REWARDS:
+        return WorkerTemplate.kudos
+    return WorkerTemplate.uptime
+
+
+def _after_cursor_condition(
+    sort_value: ColumnElement[Any],
+    worker_id: ColumnElement[Any],
+    sort: WorkerListSort,
+    after: WorkerPageCursor,
+) -> ColumnElement[bool]:
+    """Return the condition that keeps only the workers strictly after ``after`` in ``sort`` order.
+
+    Ties break by ascending ID in every order. A descending order therefore mixes directions, and a row-value
+    comparison such as ``(column, id) > (value, id)`` would not express it.
+
+    Args:
+        sort_value: The column that holds each worker's value of the sort column.
+        worker_id: The column that holds each worker's ID.
+        sort: The order of the page.
+        after: The cursor of the previous page.
+    """
+    after_id: uuid.UUID | str = uuid.UUID(after.worker_id)
+    if SQLITE_MODE:
+        after_id = str(after_id)
+    past_value = sort_value < after.sort_value if sort.descending else sort_value > after.sort_value
+    return or_(past_value, and_(sort_value == after.sort_value, worker_id > after_id))
+
+
+def _registered_worker_conditions(
+    filters: WorkerPageFilters,
+    view: WorkerListView,
+    account_id: int | None,
+) -> list[ColumnElement[bool]]:
+    """Return the conditions on the ``workers`` table for ``filters`` in ``view``."""
+    identities_by_type = {worker_class.wtype: worker_class.__mapper__.polymorphic_identity for worker_class in _LISTED_WORKER_CLASSES}
+    conditions: list[ColumnElement[bool]] = [WorkerTemplate.worker_type.in_(identities_by_type.values())]
+    if account_id is not None:
+        conditions.append(WorkerTemplate.user_id == account_id)
+    if filters.worker_type is not None:
+        conditions.append(WorkerTemplate.worker_type == identities_by_type[filters.worker_type])
+    if filters.team_id is not None:
+        team_id: uuid.UUID | str = uuid.UUID(filters.team_id)
+        conditions.append(WorkerTemplate.team_id == (str(team_id) if SQLITE_MODE else team_id))
+    if filters.owner_id is not None:
+        conditions.append(WorkerTemplate.user_id == filters.owner_id)
+        if view is WorkerListView.PUBLIC:
+            public_owner = select(User.id).where(User.id == WorkerTemplate.user_id, User.public_workers.is_(True))
+            conditions.append(public_owner.exists())
+    if filters.model is not None:
+        advertised_model = select(WorkerModel.id).where(
+            WorkerModel.worker_id == WorkerTemplate.id,
+            WorkerModel.model == filters.model,
+        )
+        conditions.append(advertised_model.exists())
+    if filters.name_contains is not None:
+        lowered_name = func.lower(WorkerTemplate.name)
+        conditions.append(lowered_name.contains(filters.name_contains.lower(), autoescape=True))
+    if filters.online is not None:
+        online_cutoff = datetime.utcnow() - timedelta(seconds=WORKER_ONLINE_SECONDS)
+        if filters.online:
+            conditions.append(WorkerTemplate.last_check_in > online_cutoff)
+        else:
+            # A worker without a check-in time is offline. Comparing NULL would leave it out of both filters.
+            conditions.append(or_(WorkerTemplate.last_check_in <= online_cutoff, WorkerTemplate.last_check_in.is_(None)))
+    return conditions
+
+
+def _query_workers_for_details(criterion: Callable[[type[WorkerTemplate]], Any]) -> list[WorkerTemplate]:
+    """Return the workers of every type that match ``criterion``, with their relationships loaded in bulk.
+
+    ``get_details(2)`` reads the owner, the owner's roles, the team, messages, kudos stats and the advertised models,
+    or the forms, annotation types and performance records of an interrogation worker. A lazy load would run one
+    SELECT for each relationship of each worker. With ``selectinload``, the number of SELECT statements depends only
+    on the number of relationships and worker types.
 
     The moderator view also reports the number of suspicion rows of each worker. The query fills
     ``suspicion_count`` with a correlated count instead of loading the rows, because one worker can hold tens of
     thousands of them and building that many ORM objects costs far more than the count.
+
+    Args:
+        criterion: A function that returns the filter expression for one worker class.
     """
-    cutoff = datetime.utcnow() - timedelta(seconds=300)
-    active_workers: list[WorkerTemplate] = []
-    for worker_class in (ImageWorker, TextWorker, InterrogationWorker):
+    matching_workers: list[WorkerTemplate] = []
+    for worker_class in _LISTED_WORKER_CLASSES:
         # The subquery runs once per selected worker and counts its rows through ix_worker_suspicions_worker_id.
         # It correlates to the outer query's workers row, so a worker with three suspicion rows gets
         # suspicion_count 3 and a worker without any gets 0 (count over no rows), never None.
@@ -409,13 +602,57 @@ def get_active_workers_for_details() -> list[WorkerTemplate]:
             ]
         else:
             type_specific_relationship_loads = [selectinload(worker_class.models)]
-        active_workers += (
+        matching_workers += (
             db.session.query(worker_class)
-            .filter(worker_class.last_check_in > cutoff)
+            .filter(criterion(worker_class))
             .options(*shared_loads, *type_specific_relationship_loads)
             .all()
         )
-    return active_workers
+    return matching_workers
+
+
+def _serialize_snapshot_value(value: object) -> str:
+    """Convert a datetime in a worker details row to ISO 8601, as the snapshot job stores it.
+
+    Raises:
+        TypeError: The value is neither a datetime nor a date, so it cannot be stored in the snapshot.
+    """
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    raise TypeError(f"Type {type(value)} not serializable")
+
+
+def read_worker_list_snapshot(view: WorkerListView) -> list[dict[str, Any]]:
+    """Return the details rows of every active worker for ``view``, from the cached snapshot.
+
+    The snapshot job on the quorum node rebuilds both views every few seconds (``store_worker_list``). When the
+    snapshot is missing, the current node rebuilds the view from the database. The node keeps the rebuilt list in its
+    local Redis for ``LOCAL_CACHE_MAX_LIFETIME``, so a burst of reads on that node causes only one rebuild. The
+    recovered snapshot is served within that lifetime after the snapshot job restarts.
+
+    Args:
+        view: Which snapshot to read.
+
+    Returns:
+        Every row of the view, unfiltered, in snapshot order. The caller must not change the rows.
+
+    Side Effects:
+        Adds 1 to ``horde.workers.list.snapshot_misses`` and logs a warning when the snapshot is missing.
+    """
+    if not hr.horde_r:
+        return [worker.get_details(view.details_privilege) for worker in get_active_workers_for_details()]
+    cached_workers = hr.horde_r_get(view.snapshot_key)
+    if cached_workers is not None:
+        return json.loads(cached_workers, object_hook=datetime_parser)
+    logger.warning(f"The {view} worker list snapshot is missing. Check the snapshot job on the quorum node.")
+    worker_list_snapshot_misses.add(1, {"horde.workers.list.view": view.value})
+    rebuilt_workers = [worker.get_details(view.details_privilege) for worker in get_active_workers_for_details()]
+    if hr.horde_local_r:
+        # A row holds datetimes when its worker has an active message, and horde_local_setex_to_json does not convert
+        # datetimes. The list is therefore serialized here.
+        serialized_workers = json.dumps(rebuilt_workers, default=_serialize_snapshot_value)
+        hr.horde_local_r.setex(view.snapshot_key, LOCAL_CACHE_MAX_LIFETIME, serialized_workers)
+    return rebuilt_workers
 
 
 def count_active_workers(worker_class="image"):

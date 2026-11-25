@@ -5,7 +5,7 @@
 
 [project]
 name = "AI-Horde"
-version = "6.0.0"
+version = "6.0.1"
 description = "A Crowdsourced Generative AI cluster for everyone."
 authors = [
     {name = "db0", email = "mail@dbzer0.com"},
@@ -232,5 +232,6 @@ module = [
     "horde.kudos_archive",
     "horde.sampler_constraints",
     "horde.sampler_work_policy",
+    "horde.worker_pages",
 ]
 strict = true

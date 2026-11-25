@@ -68,6 +68,7 @@ from horde.r2 import delete_source_image
 from horde.request_scheduling import record_request_expiry_forecast
 from horde.stripe_subs import stripe_subs
 from horde.vars import horde_instance_id
+from horde.worker_pages import WorkerListView
 
 if TYPE_CHECKING:
     from horde.kudos_archive import ArchiveTier, KudosArchive
@@ -202,14 +203,14 @@ def store_worker_list():
         serialized_workers = []
         serialized_workers_privileged = []
         for worker in get_active_workers_for_details():
-            serialized_workers.append(worker.get_details())
-            serialized_workers_privileged.append(worker.get_details(2))
+            serialized_workers.append(worker.get_details(WorkerListView.PUBLIC.details_privilege))
+            serialized_workers_privileged.append(worker.get_details(WorkerListView.MODERATOR.details_privilege))
         json_workers = json.dumps(serialized_workers, default=json_serial)
         json_workers_privileged = json.dumps(serialized_workers_privileged, default=json_serial)
         try:
-            hr.horde_r_setex("worker_cache", timedelta(seconds=300), json_workers)
+            hr.horde_r_setex(WorkerListView.PUBLIC.snapshot_key, timedelta(seconds=300), json_workers)
             hr.horde_r_setex(
-                "worker_cache_privileged",
+                WorkerListView.MODERATOR.snapshot_key,
                 timedelta(seconds=300),
                 json_workers_privileged,
             )

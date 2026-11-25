@@ -7,9 +7,11 @@ import json
 import os
 import random
 import time
+import uuid
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 import logfire
@@ -102,8 +104,18 @@ from horde.patreon import patrons
 from horde.r2 import upload_prompt
 from horde.suspicions import Suspicions
 from horde.telemetry import pyroscope_tag
-from horde.utils import datetime_parser, hash_api_key, hash_dictionary, is_profane, sanitize_string
+from horde.utils import hash_api_key, hash_dictionary, is_profane, sanitize_string
 from horde.vars import horde_contact_email, horde_repository, horde_title, horde_url
+from horde.worker_pages import (
+    DEFAULT_WORKER_LIST_SORT,
+    InvalidWorkerCursorError,
+    WorkerListSort,
+    WorkerListView,
+    WorkerPage,
+    WorkerPageCursor,
+    WorkerPageFilters,
+    WorkerPageLimits,
+)
 
 # Not used yet
 authorizations = {"apikey": {"type": "apiKey", "in": "header", "name": "apikey"}}
@@ -1846,6 +1858,71 @@ class AwardKudos(Resource):
         return ({"awarded": self.args.amount}, 200)
 
 
+def _resolve_worker_list_view(api_key: str | None, *, refuse_unknown_key: bool) -> WorkerListView:
+    """Return the moderator view for a moderator's key, and the public view for any other caller.
+
+    Args:
+        api_key: The ``apikey`` header, or None when the request does not include one.
+        refuse_unknown_key: Whether to refuse a key that does not match any account. The full list accepts such a key
+            and returns the public view. The paged list refuses it, so a moderator with a mistyped key gets an error
+            instead of the public view.
+
+    Returns:
+        The caller's view.
+
+    Raises:
+        e.InvalidAPIKey: ``refuse_unknown_key`` is set and the key does not match any account.
+    """
+    if not api_key:
+        return WorkerListView.PUBLIC
+    caller = database.find_user_by_api_key(api_key)
+    if caller is None:
+        if refuse_unknown_key:
+            raise e.InvalidAPIKey("GET WorkersPage")
+        return WorkerListView.PUBLIC
+    if caller.moderator:
+        return WorkerListView.MODERATOR
+    return WorkerListView.PUBLIC
+
+
+class WorkerListEndpoint(StrEnum):
+    """Represent the worker list endpoints, which are the values of the ``horde.workers.list.endpoint`` metric label."""
+
+    FULL = "full"
+    """``GET /v2/workers``, every active worker in one response."""
+    PAGE = "page"
+    """``GET /v2/workers/page``, one bounded page of the registered workers."""
+    MINE = "mine"
+    """``GET /v2/workers/mine``, one bounded page of the caller's workers."""
+
+
+def _record_worker_list_read(
+    *,
+    endpoint: WorkerListEndpoint,
+    view: WorkerListView,
+    sort: str,
+    filter_names: list[str],
+    continued: bool,
+    row_count: int,
+) -> None:
+    """Count one worker list read and record its row count.
+
+    Every label value comes from a fixed set, so the number of metric series stays bounded whatever values a client
+    sends.
+    """
+    metrics.worker_list_reads.add(
+        1,
+        {
+            "horde.workers.list.endpoint": endpoint.value,
+            "horde.workers.list.view": view.value,
+            "horde.workers.list.sort": sort,
+            "horde.workers.list.filters": ",".join(filter_names) or "none",
+            "horde.workers.list.continued": str(continued).lower(),
+        },
+    )
+    metrics.worker_list_rows.record(row_count, {"horde.workers.list.endpoint": endpoint.value})
+
+
 class Workers(Resource):
     get_parser = reqparse.RequestParser()
     get_parser.add_argument(
@@ -1891,45 +1968,322 @@ class Workers(Resource):
         skip_none=True,
     )
     def get(self):
-        """A List with the details of all registered and active workers"""
+        """A List with the details of all active workers
+
+        This list contains only the workers that checked in within the last 5 minutes. To page through every
+        registered worker, active or inactive, use /v2/workers/page.
+        """
         self.args = self.get_parser.parse_args()
-        return (self.retrieve_workers_details(), 200)
+        view = _resolve_worker_list_view(self.args.apikey, refuse_unknown_key=False)
+        return (self.retrieve_workers_details(view), 200, _worker_list_response_headers(view))
 
     @logger.catch(reraise=True)
-    def retrieve_workers_details(self):
-        details_privilege = 0
-        if self.args.apikey:
-            admin = database.find_user_by_api_key(self.args["apikey"])
-            if admin and admin.moderator:
-                details_privilege = 2
-        if not hr.horde_r:
-            return self.parse_worker_by_query(self.get_worker_info_list(details_privilege))
-        if details_privilege == 2:
-            cached_workers = hr.horde_r_get("worker_cache_privileged")
-        else:
-            cached_workers = hr.horde_r_get("worker_cache")
-        if cached_workers is None:
-            logger.warning(f"No {details_privilege} worker cache found! Check caching thread!")
-            workers = self.parse_worker_by_query(self.get_worker_info_list(details_privilege))
-            if details_privilege > 0:
-                hr.horde_local_setex_to_json("worker_cache_privileged", 300, workers)
-            else:
-                hr.horde_local_setex_to_json("worker_cache", 300, workers)
-            return workers
-        return self.parse_worker_by_query(json.loads(cached_workers, object_hook=datetime_parser))
+    def retrieve_workers_details(self, view: WorkerListView) -> list[dict[str, Any]]:
+        """Return the details rows of the active workers in ``view``, narrowed by ``name`` or ``type``."""
+        workers = self.parse_worker_by_query(database.read_worker_list_snapshot(view))
+        applied_filter_names = [filter_name for filter_name in ("name", "type") if self.args.get(filter_name)]
+        _record_worker_list_read(
+            endpoint=WorkerListEndpoint.FULL,
+            view=view,
+            sort="none",
+            # parse_worker_by_query applies only the first of name and type, so only that filter is counted.
+            filter_names=applied_filter_names[:1],
+            continued=False,
+            row_count=len(workers),
+        )
+        return workers
 
-    def get_worker_info_list(self, details_privilege):
-        workers_ret = []
-        for worker in database.get_active_workers_for_details():
-            workers_ret.append(worker.get_details(details_privilege))
-        return workers_ret
-
-    def parse_worker_by_query(self, workers_list):
+    def parse_worker_by_query(self, workers_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return the rows matching ``name`` (case insensitive), or else ``type``, or every row when neither is set."""
         if self.args.name:
-            return [w for w in workers_list if w["name"].lower() == self.args.name.lower()]
+            return [worker for worker in workers_list if worker["name"].lower() == self.args.name.lower()]
         if self.args.type:
-            return [w for w in workers_list if w["type"] == self.args.type]
+            return [worker for worker in workers_list if worker["type"] == self.args.type]
         return workers_list
+
+
+def _worker_list_response_headers(view: WorkerListView) -> dict[str, str]:
+    """Return the response headers for a worker list in ``view``.
+
+    Moderator and owner rows include addresses and contacts, so shared and browser caches must not store them.
+    """
+    if view is WorkerListView.PUBLIC:
+        return {}
+    return {"Cache-Control": "private, no-store"}
+
+
+def _worker_page_parser() -> reqparse.RequestParser:
+    """Create the parser of the arguments shared by every paged worker list."""
+    parser = reqparse.RequestParser()
+    parser.add_argument(
+        "Client-Agent",
+        default="unknown:0:unknown",
+        type=str,
+        required=False,
+        help="The client name and version.",
+        location="headers",
+    )
+    parser.add_argument(
+        "limit",
+        type=int,
+        default=WorkerPageLimits.DEFAULT_LIMIT,
+        required=False,
+        help=f"Workers per page (1-{WorkerPageLimits.MAX_LIMIT}).",
+        location="args",
+    )
+    parser.add_argument(
+        "cursor",
+        type=str,
+        required=False,
+        help="The next_cursor of the previous page. Omit for the first page.",
+        location="args",
+    )
+    parser.add_argument(
+        "type",
+        choices=["image", "text", "interrogation"],
+        required=False,
+        help="Only workers of this type.",
+        location="args",
+    )
+    parser.add_argument(
+        "model",
+        type=str,
+        required=False,
+        help="Only workers advertising this exact model name.",
+        location="args",
+    )
+    parser.add_argument(
+        "team_id",
+        type=str,
+        required=False,
+        help="Only workers in the team with this ID.",
+        location="args",
+    )
+    parser.add_argument(
+        "name_contains",
+        type=str,
+        required=False,
+        help=f"Only workers whose name contains this text, ignoring case. At most {WorkerPageLimits.MAX_NAME_QUERY_CHARACTERS} characters.",
+        location="args",
+    )
+    parser.add_argument(
+        "online",
+        type=inputs.boolean,
+        required=False,
+        help="Only workers that are online (true) or offline (false).",
+        location="args",
+    )
+    parser.add_argument(
+        "sort",
+        choices=list(WorkerListSort),
+        default=DEFAULT_WORKER_LIST_SORT,
+        required=False,
+        help="Page order. 'name' sorts ascending, and 'uptime', 'requests_fulfilled' and 'kudos_rewards' sort descending.",
+        location="args",
+    )
+    return parser
+
+
+class WorkerPageResource(Resource):
+    """Hold the argument checks shared by the paged worker lists.
+
+    Subclass Integration:
+        A subclass sets ``get_parser`` from ``_worker_page_parser()`` and calls ``parse_page_request()`` first.
+    """
+
+    args: ParseResult
+
+    def parse_page_request(self) -> tuple[WorkerListSort, WorkerPageFilters, WorkerPageCursor | None]:
+        """Parse the order, the filters and the cursor of a page request.
+
+        Returns:
+            The order, the filters and the cursor of the previous page, or None for the first page.
+
+        Raises:
+            e.BadRequest: The limit, the cursor or a filter is not valid.
+        """
+        sort = WorkerListSort(self.args.sort)
+        filters = self._parse_filters()
+        if not 1 <= self.args.limit <= WorkerPageLimits.MAX_LIMIT:
+            raise e.BadRequest(f"limit must be between 1 and {WorkerPageLimits.MAX_LIMIT}", rc="InvalidWorkerListLimit")
+        return sort, filters, self._parse_cursor(sort)
+
+    def _parse_cursor(self, sort: WorkerListSort) -> WorkerPageCursor | None:
+        """Parse the ``cursor`` argument, or return None for the first page.
+
+        Raises:
+            e.BadRequest: The cursor is malformed or was issued for another sort order.
+        """
+        if not self.args.cursor:
+            return None
+        try:
+            return WorkerPageCursor.decode(self.args.cursor, expected_sort=sort)
+        except InvalidWorkerCursorError as err:
+            raise e.BadRequest(str(err), rc="InvalidWorkerListCursor") from err
+
+    def _parse_filters(self) -> WorkerPageFilters:
+        """Parse the filter arguments. A blank text filter does not narrow the list.
+
+        Raises:
+            e.BadRequest: ``team_id`` is not a UUID, ``owner_id`` is negative or ``name_contains`` is too long.
+        """
+        team_id = (self.args.team_id or "").strip() or None
+        if team_id is not None:
+            try:
+                team_id = str(uuid.UUID(team_id))
+            except ValueError as err:
+                raise e.BadRequest("team_id must be a UUID", rc="InvalidWorkerListFilter") from err
+        owner_id = self.args.get("owner_id")
+        if owner_id is not None and owner_id < 0:
+            raise e.BadRequest("owner_id must not be negative", rc="InvalidWorkerListFilter")
+        name_contains = (self.args.name_contains or "").strip() or None
+        if name_contains is not None and len(name_contains) > WorkerPageLimits.MAX_NAME_QUERY_CHARACTERS:
+            raise e.BadRequest(
+                f"name_contains must be at most {WorkerPageLimits.MAX_NAME_QUERY_CHARACTERS} characters",
+                rc="InvalidWorkerListFilter",
+            )
+        return WorkerPageFilters(
+            worker_type=self.args.type,
+            model=(self.args.model or "").strip() or None,
+            team_id=team_id,
+            owner_id=owner_id,
+            name_contains=name_contains,
+            online=self.args.get("online"),
+        )
+
+    def read_page(
+        self,
+        *,
+        endpoint: WorkerListEndpoint,
+        view: WorkerListView,
+        sort: WorkerListSort,
+        filters: WorkerPageFilters,
+        after: WorkerPageCursor | None,
+        account_id: int | None = None,
+    ) -> WorkerPage:
+        """Read one page of registered workers in ``view`` and count the read.
+
+        Args:
+            endpoint: The endpoint that serves the page, for the metric label.
+            view: The caller's view.
+            sort: The order of the page.
+            filters: The filters in the request.
+            after: The cursor of the previous page, or None for the first page.
+            account_id: Only workers of this account, for the owner's list.
+        """
+        registered_page = database.page_registered_workers(
+            filters=filters,
+            sort=sort,
+            limit=self.args.limit,
+            after=after,
+            view=view,
+            account_id=account_id,
+        )
+        rows = [worker.get_details(view.details_privilege) for worker in registered_page.workers]
+        # Marshalling the rows does not use the database, so the pooled connection is released first.
+        db.session.remove()
+        _record_worker_list_read(
+            endpoint=endpoint,
+            view=view,
+            sort=sort.value,
+            filter_names=filters.applied_names,
+            continued=after is not None,
+            row_count=len(rows),
+        )
+        next_cursor = registered_page.next_cursor
+        return {
+            "workers": rows,
+            "next_cursor": next_cursor.encode() if next_cursor is not None else None,
+            "total": registered_page.total,
+        }
+
+
+class WorkersPage(WorkerPageResource):
+    """Serve every registered worker, active or inactive, one bounded page at a time.
+
+    Each row has the same fields that ``GET /v2/workers/{id}`` returns for that worker, under the same privilege rules.
+    """
+
+    decorators = [limiter.limit("90/minute")]
+
+    get_parser = _worker_page_parser()
+    get_parser.add_argument(
+        "apikey",
+        type=str,
+        required=False,
+        help=(
+            "Optional. A moderator's key gets the moderator view, and any other valid key gets the public view. "
+            "A key that does not match an account is refused."
+        ),
+        location="headers",
+    )
+    get_parser.add_argument(
+        "owner_id",
+        type=int,
+        required=False,
+        help="Only workers owned by this account. A worker is matched only when its owner is visible to the caller.",
+        location="args",
+    )
+
+    @api.expect(get_parser)
+    @api.marshal_with(models.response_model_worker_page, code=200, description="One page of registered workers")
+    @api.response(400, "Validation Error", models.response_model_error)
+    @api.response(401, "Invalid API Key", models.response_model_error)
+    def get(self) -> tuple[WorkerPage, int, dict[str, str]]:
+        """One page of every registered worker, active or inactive
+
+        To walk the list, pass each page's next_cursor back with the same sort until next_cursor is null.
+        Filters may change between pages. The cursor fixes only the position in the sort order, so a worker whose
+        sort value changes during a walk, such as an online worker gaining uptime, can be skipped or listed twice.
+        """
+        self.args = self.get_parser.parse_args()
+        sort, filters, after = self.parse_page_request()
+        view = _resolve_worker_list_view(self.args.apikey, refuse_unknown_key=True)
+        page = self.read_page(endpoint=WorkerListEndpoint.PAGE, view=view, sort=sort, filters=filters, after=after)
+        return page, 200, _worker_list_response_headers(view)
+
+
+class WorkersMine(WorkerPageResource):
+    """Serve the caller's workers one bounded page at a time, online or offline, in the owner view.
+
+    The rows are read from the database for each request, so a change of owner or settings shows at once.
+    """
+
+    decorators = [limiter.limit("90/minute")]
+
+    get_parser = _worker_page_parser()
+    get_parser.add_argument(
+        "apikey",
+        type=str,
+        required=True,
+        help="The API key of the account that owns the workers.",
+        location="headers",
+    )
+
+    @api.expect(get_parser)
+    @api.marshal_with(models.response_model_worker_page, code=200, description="One page of the caller's workers")
+    @api.response(400, "Validation Error", models.response_model_error)
+    @api.response(401, "Invalid API Key", models.response_model_error)
+    def get(self) -> tuple[WorkerPage, int, dict[str, str]]:
+        """One page of the workers owned by this API key's account, online or offline
+
+        To walk the list, pass each page's next_cursor back with the same sort until next_cursor is null.
+        """
+        self.args = self.get_parser.parse_args()
+        sort, filters, after = self.parse_page_request()
+        owner = database.find_user_by_api_key(self.args.apikey)
+        if owner is None:
+            raise e.InvalidAPIKey("GET WorkersMine")
+        view = WorkerListView.OWNER
+        page = self.read_page(
+            endpoint=WorkerListEndpoint.MINE,
+            view=view,
+            sort=sort,
+            filters=filters,
+            after=after,
+            account_id=owner.id,
+        )
+        return page, 200, _worker_list_response_headers(view)
 
 
 class WorkerSingleBase(Resource):

@@ -9,9 +9,18 @@ import random
 
 from locust import HttpUser, between, tag, task
 
-from ..helpers import _headers, _pick_requestor_key
+from ..helpers import _headers, _pick_requestor_key, _pick_worker_key
 
 logger = logging.getLogger(__name__)
+
+WORKER_PAGE_SIZE = 25
+"""Page size requested by a front end that shows the worker list one screen at a time."""
+
+MAX_WALK_PAGES = 400
+"""The largest number of pages in one walk, which is 10,000 workers at the page size above.
+
+A walk that needs more pages is logged as a walk that does not end.
+"""
 
 
 class MetaBrowser(HttpUser):
@@ -28,14 +37,17 @@ class MetaBrowser(HttpUser):
 
     def on_start(self):
         self.api_key = _pick_requestor_key()
+        self.worker_owner_key = _pick_worker_key()
         # Prime with a worker id we can fetch details for (cold path). Best-effort.
         self.worker_ids: list[str] = []
+        self.worker_names: list[str] = []
         self.user_ids: list[str] = []
         try:
             resp = self.client.get("/api/v2/workers?type=image", headers=_headers(self.api_key), name="/api/v2/workers [bootstrap]")
             if resp.ok:
                 data = resp.json() or []
                 self.worker_ids = [w.get("id") for w in data[:20] if w.get("id")]
+                self.worker_names = [w.get("name") for w in data[:20] if w.get("name")]
             resp = self.client.get("/api/v2/users", headers=_headers(self.api_key), name="/api/v2/users [bootstrap]")
             if resp.ok:
                 data = resp.json() or []
@@ -90,6 +102,82 @@ class MetaBrowser(HttpUser):
     @task(2)
     def workers_list(self):
         self.client.get("/api/v2/workers?type=image", name="/api/v2/workers [list]")
+
+    @tag("meta")
+    @task(3)
+    def workers_page_first(self):
+        """Hot path: the first screen of the worker list, as a front end loads it on every visit."""
+        self.client.get(
+            f"/api/v2/workers/page?type=image&limit={WORKER_PAGE_SIZE}",
+            name="/api/v2/workers/page [first]",
+        )
+
+    @tag("meta")
+    @task(1)
+    def workers_page_walk(self):
+        """Walk the whole list by name.
+
+        Only a rename moves a worker by name, so a repeated worker means the cursor is broken. Under a count order, a
+        worker whose count changes during the walk can be listed twice. Fail the request if a page repeats a worker or
+        is empty while it has a cursor. Log a warning if the walk does not end within ``MAX_WALK_PAGES`` pages.
+        """
+        seen_ids: set[str] = set()
+        cursor: str | None = None
+        for _ in range(MAX_WALK_PAGES):
+            params = {"limit": WORKER_PAGE_SIZE, "sort": "name"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            with self.client.get(
+                "/api/v2/workers/page",
+                params=params,
+                name="/api/v2/workers/page [walk]",
+                catch_response=True,
+            ) as resp:
+                if not resp.ok:
+                    resp.failure(f"Status {resp.status_code}: {resp.text[:200]}")
+                    return
+                body = resp.json()
+                page_ids = [row["id"] for row in body["workers"]]
+                repeated = seen_ids.intersection(page_ids)
+                if repeated:
+                    resp.failure(f"Walk listed {len(repeated)} worker(s) twice")
+                    return
+                seen_ids.update(page_ids)
+                cursor = body["next_cursor"]
+                if cursor is not None and not page_ids:
+                    resp.failure("Empty page with a cursor to follow")
+                    return
+                resp.success()
+            if cursor is None:
+                return
+        logger.warning("Worker list walk did not end within %d pages", MAX_WALK_PAGES)
+
+    @tag("meta")
+    @task(1)
+    def workers_page_search(self):
+        """Search the worker list by part of a name, as a person who remembers only part of the name does."""
+        if not self.worker_names:
+            return
+        name = random.choice(self.worker_names)
+        start = random.randrange(max(len(name) - 3, 1))
+        self.client.get(
+            "/api/v2/workers/page",
+            params={"name_contains": name[start : start + 4], "limit": WORKER_PAGE_SIZE},
+            name="/api/v2/workers/page [name search]",
+        )
+
+    @tag("meta")
+    @task(1)
+    def workers_mine(self):
+        """Read the first page of the caller's workers, as an owner's dashboard does when it polls.
+
+        Fail the request on any status other than 200. The worker keys of the stress setup are valid accounts.
+        """
+        self.client.get(
+            f"/api/v2/workers/mine?limit={WORKER_PAGE_SIZE}",
+            headers=_headers(self.worker_owner_key),
+            name="/api/v2/workers/mine [first]",
+        )
 
     @tag("meta")
     @task(2)

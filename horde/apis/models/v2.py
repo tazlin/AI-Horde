@@ -1117,6 +1117,24 @@ class Models:
             },
         )
 
+        self.response_model_worker_page = api.model(
+            "WorkerPage",
+            {
+                "workers": fields.List(
+                    # skip_none applies only to the rows. A field outside the caller's view is left out of the row, as
+                    # in /workers. next_cursor is still sent as null on the last page.
+                    fields.Nested(self.response_model_worker_details, skip_none=True),
+                    description="This page's workers, in the requested order.",
+                ),
+                "next_cursor": fields.String(
+                    description="Pass as cursor, with the same sort, to read the next page. It is null on the last page.",
+                ),
+                "total": fields.Integer(
+                    description="How many registered workers pass the filters, across all pages, when this page was read.",
+                ),
+            },
+        )
+
         self.input_model_worker_modify = api.model(
             "ModifyWorkerInput",
             {

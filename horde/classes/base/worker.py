@@ -425,10 +425,11 @@ class WorkerTemplate(db.Model):
         cascade="all, delete-orphan",
     )
     suspicion_count: Mapped[int | None] = query_expression()
-    """The number of the worker's ``suspicions`` rows, counted in SQL by
-    [`get_active_workers_for_details`][horde.database.functions.get_active_workers_for_details]. It is None when the
-    loading query did not compute it. A worker can hold tens of thousands of suspicion rows, so the
-    bulk worker list reads this count instead of loading the rows."""
+    """The number of the worker's ``suspicions`` rows, counted in SQL by the bulk loaders
+    [`get_active_workers_for_details`][horde.database.functions.get_active_workers_for_details] and
+    [`page_registered_workers`][horde.database.functions.page_registered_workers]. It is None when the loading query
+    did not compute it. A worker can hold tens of thousands of suspicion rows, so the worker lists read this count
+    instead of loading the rows."""
     messages = db.relationship("WorkerMessage", back_populates="worker", cascade="all, delete-orphan")
 
     require_upfront_kudos = False
