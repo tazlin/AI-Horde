@@ -16,6 +16,7 @@ the ordered steps, the checks between them, and the way back if a step fails.
 | --- | --- |
 | [Kudos ledger operations](kudos_ledger_operations.md) | Operator procedures for the kudos ledger: mode cutover, health checks, rollback, recovery, partition conversion, and event retention. |
 | [Add extended image controls to a frontend](extended_image_frontend.md) | Integrate sampler discovery, schedules, solver controls, expanded ControlNet types, and control-map annotations into an existing image frontend. |
+| [Review linked accounts and registration signals](review_linked_accounts.md) | Turn on reCAPTCHA for the register page, tune its scores from the metrics, and read the linked-transfer, generation and registration events. |
 | [Add a sampler, scheduler, solver control, or annotator](add_sampler_or_annotator.md) | Extend the image sampler and control-map vocabularies across hordelib, horde_sdk, AI-Horde, and the reGen bridge, in the order that keeps them compatible. |
 | [Add an image baseline](add_image_baseline.md) | Publish the baseline record on the model reference, and add a bridge row only when a release adds the engine support. |
 | [Use the style endpoints](use_style_endpoints.md) | Read the published style contract, create text and image styles that declare a policy and placeholders, and send requests under them. |

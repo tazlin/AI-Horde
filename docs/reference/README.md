@@ -20,6 +20,7 @@ The concepts they assume (what a worker is, what a job's lifecycle means) are in
 | [Operational constants](operational_constants.md) | Process budgets, scheduling and cache intervals, projection batches, retention controls and storage timeouts, with implementation references and rationale. |
 | [Prompt provenance reference](prompt_provenance.md) | What each stored prompt value means, who may read the original submission, and why a missing original is never filled in. |
 | [Moderation operations reference](moderation_operations.md) | Moderation evidence, retention and object storage, with API fields for event review, promotion queues and worker suspicion history. |
+| [Shared keys and account links reference](shared_keys_and_account_links.md) | What a shared key may do for its owner, how accounts are linked by network pseudonym, what a link changes for transfers and registration, and the events, metrics and settings that report it. |
 | [Kudos accounting reference](kudos_accounting.md) | The mutation and consumption contract: accounting events, projection targets, reservations, the lock order, the read models, and event retention. |
 | [Samplers and schedulers reference](samplers_and_schedulers.md) | Sampler and scheduler controls, recorded SD1.5/SDXL measurements, compatibility caveats, work estimates, pricing and job leases. |
 | [Image baseline policy reference](baseline_policy.md) | The two authorities a baseline-dependent request is checked against, what each one decides, and what applies to a baseline with no record. |

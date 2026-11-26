@@ -66,25 +66,32 @@ procedure for one subject sit together.
 
 - Explanation: [Kudos accounting, projection, and concurrency](explanation/kudos_accounting.md)
 - Explanation: [Kudos event retention](explanation/kudos_retention.md)
+- Explanation: [Shared keys and linked accounts](explanation/shared_keys_and_linked_accounts.md)
 - How-to: [Kudos ledger operations](how-to/kudos_ledger_operations.md)
 - How-to: [Add an image baseline](how-to/add_image_baseline.md)
 - Reference: [Service limits and behavioral constants](reference/service_limits.md)
+- Reference: [Shared keys and account links reference](reference/shared_keys_and_account_links.md)
 - Reference: [Kudos accounting reference](reference/kudos_accounting.md)
 - Reference: [Image baseline policy reference](reference/baseline_policy.md)
 
 ### moderation
 
+- Explanation: [Shared keys and linked accounts](explanation/shared_keys_and_linked_accounts.md)
+- How-to: [Review linked accounts and registration signals](how-to/review_linked_accounts.md)
 - Reference: [Service limits and behavioral constants](reference/service_limits.md)
 - Reference: [Operational constants](reference/operational_constants.md)
 - Reference: [Prompt provenance reference](reference/prompt_provenance.md)
 - Reference: [Moderation operations reference](reference/moderation_operations.md)
+- Reference: [Shared keys and account links reference](reference/shared_keys_and_account_links.md)
 
 ### operations
 
 - How-to: [Kudos ledger operations](how-to/kudos_ledger_operations.md)
+- How-to: [Review linked accounts and registration signals](how-to/review_linked_accounts.md)
 - How-to: [Run the OpenAI-compatible chat front](how-to/run_openai_chat_front.md)
 - Reference: [Operational constants](reference/operational_constants.md)
 - Reference: [Moderation operations reference](reference/moderation_operations.md)
+- Reference: [Shared keys and account links reference](reference/shared_keys_and_account_links.md)
 - Reference: [Request scheduling telemetry and forecasts](reference/request_scheduling.md)
 - Reference: [Chat front reference](reference/chat_front.md)
 - Reference: [Outbound requests reference](reference/outbound_requests.md)

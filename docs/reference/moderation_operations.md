@@ -51,6 +51,7 @@ The moderator API lists this history along with the current promotion and paused
 | Worker suspicion history    | `horde/classes/base/worker.py`              | `WorkerSuspicionEvent`, written by `WorkerTemplate.report_suspicion` |
 | Promotion criteria          | `horde/classes/base/user.py`                | `User.promotion_status`, `User.promotion_queue_criteria`, `PromotionStatus` |
 | Review queues, history      | `horde/database/moderation.py`              | `get_moderation_overview`, `get_worker_suspicion_events` |
+| Shared key and account link endpoints | `horde/apis/v2/access_operations.py` | `OperationsSharedKey`, `OperationsAccountLinks` |
 
 The schema is `sql_statements/5.1.12.txt`. Tests build the tables from the models, so
 `test_orm_models_build_the_same_moderation_tables_as_the_migration` in
@@ -243,6 +244,37 @@ counts all matches before the limit. An unknown `suspicion_id` returns `400 Inva
 `created`, `worker_id`, `worker_name`, `user_id`, `suspicion_id`, `reason` and `detail`, newest first, with `limit`
 1-500 (default 100) and the same `before_id` cursor as `/prompts`. A `worker_id` that is not a UUID returns
 `400 InvalidWorkerID`.
+
+### Shared keys
+
+The shared key policy is described in the
+[shared keys and account links reference](shared_keys_and_account_links.md#shared-keys). A key's `status` is `active`,
+`suspended_by_owner` or `suspended_by_moderator`. Every request through a suspended key is refused with
+`403 SharedKeySuspended`.
+
+- `GET /sharedkeys/<id>` returns the key's owner and the key with its private policy (`allowed_networks`, the status
+  reason and time).
+- `PATCH /sharedkeys/<id>` accepts `{status, reason}`. `status` is `suspended_by_moderator` or `active`, and `active`
+  lifts any suspension. Any other status returns `400 InvalidSharedKeyPolicy`. A reason that is blank or longer than
+  255 characters returns `400 InvalidModerationNote`. The owner cannot lift a moderator suspension. The reason is
+  stored on the key and shown to the owner. Each change emits the `horde.sharedkey.status_changed` event, which does
+  not include the reason.
+
+### Account links
+
+A registered account using its personal key is recorded against the pseudonym of its network for 30 days. The
+pseudonym is the same `ip_subject_key` that prompt evidence records, so the two listings can be read together. What a
+link changes for transfers and registration, and the events that report it, are in the
+[shared keys and account links reference](shared_keys_and_account_links.md#account-links). None of it sends moderators a
+notice.
+
+`GET /account_links` takes exactly one of `user_id` and `ip_subject_key`, or returns `400 InvalidAccountLinkFilter`.
+With `user_id` it returns the account's networks, the ones shared with other accounts first, each with the other
+accounts seen there. With `ip_subject_key` it returns the accounts seen on that network. Each account row shows when it
+was first and last seen there, and whether it is flagged, deleted or trusted. The listing does not return any address.
+
+The procedure for reading the reports is in
+[Review linked accounts and registration signals](../how-to/review_linked_accounts.md).
 
 ## Worker suspicion history
 
@@ -553,3 +585,5 @@ contracts.
 ## Related
 
 - [Prompt provenance reference](prompt_provenance.md)
+- [Shared keys and account links reference](shared_keys_and_account_links.md): the shared key policy, account links,
+  and their events and metrics.
