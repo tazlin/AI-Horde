@@ -9,7 +9,7 @@ import uuid
 from locust import HttpUser, between, tag, task
 
 from ..config import _config
-from ..helpers import _headers, _pick_requestor_key, _pick_worker_key, _random_prompt, _record_expected
+from ..helpers import _accept_rate_limit, _headers, _pick_requestor_key, _pick_worker_key, _random_prompt, _record_expected
 
 
 class MisuseUser(HttpUser):
@@ -134,7 +134,12 @@ class MisuseUser(HttpUser):
             self._expect_4xx(resp, "/api/v2/workers/name/[name] [misuse-missing]")
 
     def _expect_refusal(self, resp, name: str, return_code: str, status_code: int = 400):
-        """Pass only the documented status and return code, because any page here would be a wrong response."""
+        """Pass only the documented status and return code, because any page here would be a wrong response.
+
+        A 429 comes from the rate limiter before the arguments are checked, so it is recorded as rate limited.
+        """
+        if _accept_rate_limit(resp, self.environment, name):
+            return
         if resp.status_code == status_code and (resp.json() or {}).get("rc") == return_code:
             resp.success()
             _record_expected(

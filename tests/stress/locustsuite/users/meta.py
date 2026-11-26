@@ -9,15 +9,22 @@ import random
 
 from locust import HttpUser, between, tag, task
 
-from ..helpers import _headers, _pick_requestor_key, _pick_worker_key
+from ..helpers import _accept_rate_limit, _headers, _pick_requestor_key, _pick_worker_key
 
 logger = logging.getLogger(__name__)
 
 WORKER_PAGE_SIZE = 25
 """Page size requested by a front end that shows the worker list one screen at a time."""
 
+WORKER_WALK_PAGE_SIZE = 100
+"""Page size of a full walk, the largest the endpoint allows.
+
+A walk sends its pages back to back, and the paged list allows 90 requests a minute per address. At 25 rows a page, a
+walk of a few thousand workers uses that whole allowance by itself.
+"""
+
 MAX_WALK_PAGES = 400
-"""The largest number of pages in one walk, which is 10,000 workers at the page size above.
+"""The largest number of pages in one walk, which is 40,000 workers at the walk page size above.
 
 A walk that needs more pages is logged as a walk that does not end.
 """
@@ -107,10 +114,26 @@ class MetaBrowser(HttpUser):
     @task(3)
     def workers_page_first(self):
         """Hot path: the first screen of the worker list, as a front end loads it on every visit."""
-        self.client.get(
+        name = "/api/v2/workers/page [first]"
+        with self.client.get(
             f"/api/v2/workers/page?type=image&limit={WORKER_PAGE_SIZE}",
-            name="/api/v2/workers/page [first]",
-        )
+            name=name,
+            catch_response=True,
+        ) as resp:
+            self._expect_worker_list_page(resp, name)
+
+    def _expect_worker_list_page(self, resp, name: str) -> None:
+        """Pass a 200 and record a 429 as rate limited. Fail any other status.
+
+        The failure message includes ``Status <code>`` so the smoke checker sorts it by status. Without it, a refusal
+        would be counted as a crash.
+        """
+        if _accept_rate_limit(resp, self.environment, name):
+            return
+        if resp.ok:
+            resp.success()
+            return
+        resp.failure(f"Status {resp.status_code}: {resp.text[:200]}")
 
     @tag("meta")
     @task(1)
@@ -119,20 +142,24 @@ class MetaBrowser(HttpUser):
 
         Only a rename moves a worker by name, so a repeated worker means the cursor is broken. Under a count order, a
         worker whose count changes during the walk can be listed twice. Fail the request if a page repeats a worker or
-        is empty while it has a cursor. Log a warning if the walk does not end within ``MAX_WALK_PAGES`` pages.
+        is empty while it has a cursor. Log a warning if the walk does not end within ``MAX_WALK_PAGES`` pages. A 429
+        ends the walk without a failure.
         """
+        name = "/api/v2/workers/page [walk]"
         seen_ids: set[str] = set()
         cursor: str | None = None
         for _ in range(MAX_WALK_PAGES):
-            params = {"limit": WORKER_PAGE_SIZE, "sort": "name"}
+            params = {"limit": WORKER_WALK_PAGE_SIZE, "sort": "name"}
             if cursor is not None:
                 params["cursor"] = cursor
             with self.client.get(
                 "/api/v2/workers/page",
                 params=params,
-                name="/api/v2/workers/page [walk]",
+                name=name,
                 catch_response=True,
             ) as resp:
+                if _accept_rate_limit(resp, self.environment, name):
+                    return
                 if not resp.ok:
                     resp.failure(f"Status {resp.status_code}: {resp.text[:200]}")
                     return
@@ -160,24 +187,30 @@ class MetaBrowser(HttpUser):
             return
         name = random.choice(self.worker_names)
         start = random.randrange(max(len(name) - 3, 1))
-        self.client.get(
+        request_name = "/api/v2/workers/page [name search]"
+        with self.client.get(
             "/api/v2/workers/page",
             params={"name_contains": name[start : start + 4], "limit": WORKER_PAGE_SIZE},
-            name="/api/v2/workers/page [name search]",
-        )
+            name=request_name,
+            catch_response=True,
+        ) as resp:
+            self._expect_worker_list_page(resp, request_name)
 
     @tag("meta")
     @task(1)
     def workers_mine(self):
         """Read the first page of the caller's workers, as an owner's dashboard does when it polls.
 
-        Fail the request on any status other than 200. The worker keys of the stress setup are valid accounts.
+        Fail the request on any status other than 200 or 429. The worker keys of the stress setup are valid accounts.
         """
-        self.client.get(
+        name = "/api/v2/workers/mine [first]"
+        with self.client.get(
             f"/api/v2/workers/mine?limit={WORKER_PAGE_SIZE}",
             headers=_headers(self.worker_owner_key),
-            name="/api/v2/workers/mine [first]",
-        )
+            name=name,
+            catch_response=True,
+        ) as resp:
+            self._expect_worker_list_page(resp, name)
 
     @tag("meta")
     @task(2)
