@@ -15,6 +15,7 @@ from flask_dance.contrib.google import google
 from markdown import markdown
 
 from horde import vars as hv
+from horde.account_links import evaluate_registration, record_account_link, report_registration
 from horde.apis.request_utils import get_remoteaddr
 from horde.argparser import maintenance
 from horde.classes.base import settings
@@ -341,6 +342,7 @@ def register():
     if user:
         welcome = f"Welcome back {user.get_unique_alias()}"
     if request.method == "POST":
+        recaptcha_verdict = None
         if use_recaptcha:
             recaptcha_verdict = verify_registration_token(request.form.get("g-recaptcha-response"), secret_key)
             if not recaptcha_verdict.passed:
@@ -391,9 +393,27 @@ def register():
                         error_message="We cannot allow anonymous registrations at the moment. "
                         "Please use one of the oauth2 buttons to login first.",
                     )
+                registration_decision = evaluate_registration(registration_ip, pseudonymous=True, recaptcha=recaptcha_verdict)
+                if not registration_decision.allowed:
+                    report_registration(registration_decision)
+                    return _render_register_page(
+                        use_recaptcha=use_recaptcha,
+                        welcome=welcome,
+                        user=None,
+                        api_key=None,
+                        username=request.form.get("username", ""),
+                        pseudonymous=False,
+                        oauth_id=None,
+                        registration_error=registration_decision.reason,
+                        status=403,
+                    )
+            else:
+                registration_decision = evaluate_registration(registration_ip, pseudonymous=False)
             username = sanitize_string(request.form["username"])
             user = User(username=username, oauth_id=oauth_id, api_key=hashed_api_key)
             user.create()
+            report_registration(registration_decision, user)
+        record_account_link(user, registration_ip, commit=True)
     if user:
         welcome = f"Welcome back {user.get_unique_alias()}"
     return _render_register_page(

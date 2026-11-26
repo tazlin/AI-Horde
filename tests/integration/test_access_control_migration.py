@@ -17,9 +17,9 @@ import sqlparse
 from tests.dependency_runtime import create_schema, drop_schema, new_test_schema_name
 
 MIGRATION_PATH = Path(__file__).resolve().parents[2] / "sql_statements" / "6.1.0.txt"
-"""The production migration for shared key policies."""
+"""The production migration for shared key policies and account links."""
 USERS_STUB = "CREATE TABLE users (id INTEGER PRIMARY KEY)"
-"""The accounts table, referenced by the shared keys and the account roles."""
+"""The table referenced by the new tables."""
 SHAREDKEYS_STUB = (
     "CREATE TABLE user_sharedkeys (id UUID PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE, "
     "kudos BIGINT NOT NULL, created TIMESTAMP NOT NULL, expiry TIMESTAMP, name VARCHAR(255), utilized BIGINT NOT NULL, "
@@ -37,6 +37,8 @@ SERVICE_OWNER_KEY_ID = "00000000-0000-0000-0000-0000000000bb"
 """An existing key of a service account."""
 REVOKED_SERVICE_OWNER_KEY_ID = "00000000-0000-0000-0000-0000000000cc"
 """An existing key of an account with a service role row whose value is false."""
+NEW_TABLES = ("ip_subject_account_links",)
+"""The tables created by the migration."""
 NEW_SHAREDKEY_COLUMNS = (
     "scopes",
     "roles",
@@ -152,27 +154,62 @@ def test_running_the_migration_again_keeps_an_owner_role_list(migrated_schema: s
     assert _roles_of(migrated_schema, SERVICE_OWNER_KEY_ID) == []
 
 
-def _catalog(connection: sqlalchemy.Connection) -> dict[str, Any]:
-    """Return the column attributes of the migrated columns, as PostgreSQL renders them."""
+def test_an_account_is_stored_once_per_network(migrated_schema: sqlalchemy.Connection) -> None:
+    """Recording an account again on the same network updates its one row, which the upsert relies on."""
+    migrated_schema.execute(sqlalchemy.text("INSERT INTO ip_subject_account_links (subject_key, user_id) VALUES ('k', 2)"))
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        migrated_schema.execute(sqlalchemy.text("INSERT INTO ip_subject_account_links (subject_key, user_id) VALUES ('k', 2)"))
+
+
+def test_deleting_an_account_removes_its_links(migrated_schema: sqlalchemy.Connection) -> None:
+    """Links are personal data and are deleted with the account."""
+    migrated_schema.execute(sqlalchemy.text("INSERT INTO ip_subject_account_links (subject_key, user_id) VALUES ('k', 2)"))
+
+    migrated_schema.execute(sqlalchemy.text("DELETE FROM users WHERE id = 2"))
+
+    assert migrated_schema.execute(sqlalchemy.text("SELECT count(*) FROM ip_subject_account_links")).scalar_one() == 0
+
+
+def _catalog(connection: sqlalchemy.Connection, schema_name: str) -> dict[str, Any]:
+    """Return the column attributes, constraints and indexes of the migrated tables and columns, as PostgreSQL renders them."""
     items: dict[str, Any] = {}
-    for name, type_name, not_null, default in connection.execute(
-        sqlalchemy.text(
-            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_get_expr(d.adbin, d.adrelid) "
-            "FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
-            "WHERE a.attrelid = CAST(:table AS regclass) AND a.attnum > 0 AND NOT a.attisdropped",
-        ),
-        {"table": "user_sharedkeys"},
-    ):
-        if name not in NEW_SHAREDKEY_COLUMNS:
+    for table in (*NEW_TABLES, "user_sharedkeys"):
+        relation = {"table": table}
+        for name, type_name, not_null, default in connection.execute(
+            sqlalchemy.text(
+                "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_get_expr(d.adbin, d.adrelid) "
+                "FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
+                "WHERE a.attrelid = CAST(:table AS regclass) AND a.attnum > 0 AND NOT a.attisdropped",
+            ),
+            relation,
+        ):
+            if table == "user_sharedkeys" and name not in NEW_SHAREDKEY_COLUMNS:
+                continue
+            items[f"{table} column {name} type"] = type_name
+            items[f"{table} column {name} not null"] = not_null
+            items[f"{table} column {name} server default"] = default
+        if table == "user_sharedkeys":
             continue
-        items[f"user_sharedkeys column {name} type"] = type_name
-        items[f"user_sharedkeys column {name} not null"] = not_null
-        items[f"user_sharedkeys column {name} server default"] = default
+        for name, definition in connection.execute(
+            sqlalchemy.text("SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = CAST(:table AS regclass)"),
+            relation,
+        ):
+            items[f"{table} constraint {name}"] = definition.replace(f"{schema_name}.", "")
+        for name, definition in connection.execute(
+            sqlalchemy.text(
+                "SELECT c.relname, pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                "WHERE i.indrelid = CAST(:table AS regclass)",
+            ),
+            relation,
+        ):
+            items[f"{table} index {name}"] = definition.replace(f"{schema_name}.", "")
     return items
 
 
 def test_orm_models_build_the_same_schema_as_the_migration(pg_dsn: str) -> None:
     """The behavior tests create their schema from the ORM models, and production uses the migration, so the two must match."""
+    from horde.classes.base.account_link import IpSubjectAccountLink
     from horde.classes.base.user import UserSharedKey
 
     migration_schema = new_test_schema_name("horde_access_parity_sql")
@@ -186,17 +223,22 @@ def test_orm_models_build_the_same_schema_as_the_migration(pg_dsn: str) -> None:
         with migration_engine.connect() as connection:
             _create_pre_migration_tables(connection)
             _apply_migration(connection)
-            migration_catalog = _catalog(connection)
+            migration_catalog = _catalog(connection, migration_schema)
         with orm_engine.connect() as connection:
             connection.execute(sqlalchemy.text(USERS_STUB))
-            UserSharedKey.__table__.create(connection)
-            orm_catalog = _catalog(connection)
+            for table in (
+                UserSharedKey.__table__,
+                IpSubjectAccountLink.__table__,
+            ):
+                table.create(connection)
+            orm_catalog = _catalog(connection, orm_schema)
     finally:
         for engine in engines:
             engine.dispose()
         for schema_name in (migration_schema, orm_schema):
             drop_schema(pg_dsn, schema_name)
 
+    assert any(" index " in item for item in migration_catalog), "the catalog query did not return any index"
     differences = [
         f"{item}: migration {migration_catalog.get(item, ABSENT)!r}, ORM {orm_catalog.get(item, ABSENT)!r}"
         for item in sorted(migration_catalog.keys() | orm_catalog.keys())

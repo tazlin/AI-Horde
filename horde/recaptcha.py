@@ -6,16 +6,19 @@
 
 The registration page uses reCAPTCHA v3, which does not show a puzzle. Google returns a score from 0.0 (likely
 automated) to 1.0 (likely a person) and the action name set by the page. A submission passes when the token is valid,
-the action is ``REGISTRATION_ACTION``, and the score is at least the minimum score. A submission that cannot be
-verified does not pass, including when the verification endpoint cannot be reached.
+the action is ``REGISTRATION_ACTION``, and the score is at least the minimum score. The linked-account registration
+policy asks for a higher score from a network with review signals. A submission that cannot be verified does not pass,
+including when the verification endpoint cannot be reached.
 
-The verification is enabled by ``RECAPTCHA_SECRET_KEY``. The minimum score comes from ``RECAPTCHA_MIN_SCORE``. Both are
-read when a submission is verified, so a change to the environment applies without a code change.
+The verification is enabled by ``RECAPTCHA_SECRET_KEY``. The thresholds come from ``RECAPTCHA_MIN_SCORE`` and
+``RECAPTCHA_LINKED_NETWORK_MIN_SCORE``. All three are read when a submission is verified, so a change to the environment
+applies without a code change.
 
 Public members:
 
 - [`verify_registration_token`][horde.recaptcha.verify_registration_token]: verify one submission.
 - [`record_recaptcha_disabled`][horde.recaptcha.record_recaptcha_disabled]: count a submission without reCAPTCHA.
+- [`linked_network_min_score`][horde.recaptcha.linked_network_min_score]: the raised threshold.
 - [`refusal_message`][horde.recaptcha.refusal_message]: the message shown for a submission that did not pass.
 """
 
@@ -31,10 +34,12 @@ from horde.logger import logger
 from horde.metrics import recaptcha_scores, recaptcha_verifications
 
 __all__ = [
+    "DEFAULT_LINKED_NETWORK_MIN_SCORE",
     "DEFAULT_MIN_SCORE",
     "REGISTRATION_ACTION",
     "RecaptchaOutcome",
     "RecaptchaVerdict",
+    "linked_network_min_score",
     "min_score",
     "record_recaptcha_disabled",
     "refusal_message",
@@ -50,6 +55,9 @@ REGISTRATION_ACTION: str = "submit"
 DEFAULT_MIN_SCORE: float = 0.5
 """The minimum score of every registration, when ``RECAPTCHA_MIN_SCORE`` is not set. This is the default suggested by
 Google."""
+DEFAULT_LINKED_NETWORK_MIN_SCORE: float = 0.7
+"""The minimum score of a registration from a network with review signals, when ``RECAPTCHA_LINKED_NETWORK_MIN_SCORE``
+is not set."""
 
 
 class RecaptchaOutcome(StrEnum):
@@ -84,6 +92,22 @@ class RecaptchaVerdict:
     def passed(self) -> bool:
         """Whether the submission passed the minimum score."""
         return self.outcome is RecaptchaOutcome.PASSED
+
+    def meets(self, required_score: float) -> bool:
+        """Return whether the submission passed and its score is at least ``required_score``.
+
+        A passed verification without a score comes from a v2 key, where Google decides whether to show a puzzle. It
+        meets every threshold, because a v2 key does not give a score to compare.
+
+        Args:
+            required_score: The score to meet.
+
+        Returns:
+            Whether the submission meets the score.
+        """
+        if not self.passed:
+            return False
+        return self.score is None or self.score >= required_score
 
 
 _REFUSAL_MESSAGES: dict[RecaptchaOutcome, str] = {
@@ -127,6 +151,15 @@ def _score_from_env(name: str, default: float) -> float:
 def min_score() -> float:
     """Return the minimum score of every registration, from ``RECAPTCHA_MIN_SCORE``."""
     return _score_from_env("RECAPTCHA_MIN_SCORE", DEFAULT_MIN_SCORE)
+
+
+def linked_network_min_score() -> float:
+    """Return the minimum score of a registration from a network with review signals.
+
+    The value comes from ``RECAPTCHA_LINKED_NETWORK_MIN_SCORE``. It is never lower than the minimum score of every
+    registration.
+    """
+    return max(min_score(), _score_from_env("RECAPTCHA_LINKED_NETWORK_MIN_SCORE", DEFAULT_LINKED_NETWORK_MIN_SCORE))
 
 
 def _record(verdict: RecaptchaVerdict) -> RecaptchaVerdict:

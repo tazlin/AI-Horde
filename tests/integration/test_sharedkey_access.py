@@ -24,11 +24,13 @@ from tests.integration._fake_chat_worker import CHAT_MESSAGES, CHAT_MODEL, FakeC
 from tests.integration.test_request_parameters import IMAGE_REQUEST, TEXT_REQUEST
 
 AGENT: str = "aihorde_ci_client:1.0:(test)ci"
+TEST_IP_SUBJECT_SECRET: bytes = b"shared key integration secret"
+"""The secret for network pseudonyms. The test environment does not set one."""
 
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Disable rate limits and outside notices, and use a fake Redis for the address suspicion cache."""
+    """Disable rate limits and outside notices, set the pseudonym secret, and use a fake Redis for the address suspicion cache."""
     import fakeredis
 
     from horde import countermeasures
@@ -38,6 +40,7 @@ def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     previous = limiter.enabled
     limiter.enabled = False
+    monkeypatch.setattr(countermeasures, "IP_SUBJECT_KEY_SECRET", TEST_IP_SUBJECT_SECRET)
     monkeypatch.setattr(countermeasures, "ip_s_r", fakeredis.FakeStrictRedis())
     monkeypatch.setattr(base, "upload_prompt", lambda *_: None)
     monkeypatch.setattr(base, "send_problem_user_notification", lambda *_: None)

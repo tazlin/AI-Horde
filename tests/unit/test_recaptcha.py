@@ -4,8 +4,8 @@
 
 """Test the reCAPTCHA verification of the register page, with a stand-in for Google's verification endpoint.
 
-The verification checks whether a registration form submission came from a person. An operator tunes it with a
-minimum score, and the metrics show whether it runs at all. A deployment that sets a bad threshold must keep a working
+The verification checks whether a registration form submission came from a person. An operator tunes it with two
+scores, and the metrics show whether it runs at all. A deployment that sets a bad threshold must keep a working
 default, and an outage at Google must not count as a person passing.
 """
 
@@ -20,8 +20,11 @@ import requests
 
 from horde import recaptcha
 from horde.recaptcha import (
+    DEFAULT_LINKED_NETWORK_MIN_SCORE,
     DEFAULT_MIN_SCORE,
     RecaptchaOutcome,
+    RecaptchaVerdict,
+    linked_network_min_score,
     min_score,
     record_recaptcha_disabled,
     refusal_message,
@@ -50,6 +53,7 @@ def metrics(monkeypatch: pytest.MonkeyPatch) -> _Metrics:
     monkeypatch.setattr(recaptcha, "recaptcha_verifications", recorded)
     monkeypatch.setattr(recaptcha, "recaptcha_scores", SimpleNamespace(record=recorded.record))
     monkeypatch.delenv("RECAPTCHA_MIN_SCORE", raising=False)
+    monkeypatch.delenv("RECAPTCHA_LINKED_NETWORK_MIN_SCORE", raising=False)
     return recorded
 
 
@@ -131,22 +135,48 @@ class TestVerification:
 
 
 class TestThresholds:
-    """Operators set the minimum score through the environment, and a bad value falls back to the default."""
+    """Operators set the scores through the environment, and a bad value falls back to the default."""
 
-    def test_the_default_follows_googles_suggestion(self) -> None:
-        assert min_score() == DEFAULT_MIN_SCORE
+    def test_the_defaults_follow_googles_suggestion_and_ask_more_of_a_flagged_network(self) -> None:
+        assert (min_score(), linked_network_min_score()) == (DEFAULT_MIN_SCORE, DEFAULT_LINKED_NETWORK_MIN_SCORE)
+        assert DEFAULT_LINKED_NETWORK_MIN_SCORE > DEFAULT_MIN_SCORE
 
     @pytest.mark.parametrize("raw_value", ["high", "1.5", "-0.1", "  "])
     def test_a_value_that_is_not_a_score_falls_back_to_the_default(self, monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
         monkeypatch.setenv("RECAPTCHA_MIN_SCORE", raw_value)
+        monkeypatch.setenv("RECAPTCHA_LINKED_NETWORK_MIN_SCORE", raw_value)
 
-        assert min_score() == DEFAULT_MIN_SCORE
+        assert (min_score(), linked_network_min_score()) == (DEFAULT_MIN_SCORE, DEFAULT_LINKED_NETWORK_MIN_SCORE)
+
+    def test_the_score_for_a_flagged_network_is_never_below_the_minimum(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Lowering the flagged-network score below the minimum would make a flagged network easier to register from."""
+        monkeypatch.setenv("RECAPTCHA_MIN_SCORE", "0.6")
+        monkeypatch.setenv("RECAPTCHA_LINKED_NETWORK_MIN_SCORE", "0.3")
+
+        assert linked_network_min_score() == 0.6
 
     def test_a_changed_minimum_applies_to_the_next_submission(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _site_verify(monkeypatch, {"success": True, "score": 0.3, "action": "submit"})
         monkeypatch.setenv("RECAPTCHA_MIN_SCORE", "0.2")
 
         assert verify_registration_token("token", "secret").passed
+
+
+class TestMeets:
+    """The flagged-network check compares the score of a passed submission with the higher threshold."""
+
+    @pytest.mark.parametrize(
+        ("verdict", "expected"),
+        [
+            (RecaptchaVerdict(RecaptchaOutcome.PASSED, 0.7), True),
+            (RecaptchaVerdict(RecaptchaOutcome.PASSED, 0.6), False),
+            (RecaptchaVerdict(RecaptchaOutcome.PASSED, None), True),
+            (RecaptchaVerdict(RecaptchaOutcome.LOW_SCORE, 0.9), False),
+        ],
+        ids=["at-the-threshold", "below-the-threshold", "v2-key-without-a-score", "not-passed"],
+    )
+    def test_meets_the_higher_threshold(self, verdict: RecaptchaVerdict, expected: bool) -> None:
+        assert verdict.meets(0.7) is expected
 
 
 class TestRefusalMessages:

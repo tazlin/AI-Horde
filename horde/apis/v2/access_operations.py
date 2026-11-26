@@ -2,28 +2,31 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Expose moderator shared key suspension.
+"""Expose moderator shared key suspension and linked-account review.
 
 Every resource here requires a moderator ``apikey``. Every response has ``Cache-Control: private, no-store``, because
-the payloads hold account identity and key policies.
+the payloads hold account identity, network pseudonyms and key policies.
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from flask_restx import Resource, fields, reqparse
 
 from horde import exceptions as e
 from horde.access_control import MODERATOR_SETTABLE_STATUSES, SharedKeyActor, SharedKeyLimits, SharedKeyStatus
+from horde.account_links import list_account_links, list_subject_accounts
 from horde.apis.v2.base import api, check_for_mod, models
-from horde.apis.v2.moderation import PRIVATE_HEADERS, _add_moderator_credentials, _moderator_limits
-from horde.classes.base.user import UserSharedKey
+from horde.apis.v2.moderation import PRIVATE_HEADERS, _add_moderator_credentials, _assert_ip_subject_key, _moderator_limits
+from horde.classes.base.user import User, UserSharedKey
 from horde.database import functions as database
 from horde.database.sharedkeys import change_sharedkey_status
 from horde.flask import db
 
 __all__ = [
+    "OperationsAccountLinks",
     "OperationsSharedKey",
 ]
 
@@ -50,6 +53,41 @@ _moderator_sharedkey_status_input = api.model(
         ),
     },
 )
+_linked_account_model = api.model(
+    "LinkedAccount",
+    {
+        "user_id": fields.Integer(),
+        "username": fields.String(description="The account's unique alias."),
+        "first_seen": fields.DateTime(dt_format="iso8601"),
+        "last_seen": fields.DateTime(dt_format="iso8601"),
+        "flagged": fields.Boolean(),
+        "deleted": fields.Boolean(),
+        "trusted": fields.Boolean(),
+    },
+)
+_linked_network_model = api.model(
+    "LinkedNetwork",
+    {
+        "subject_key": fields.String(description="The network pseudonym. It matches the ip_subject_key of prompt evidence."),
+        "first_seen": fields.DateTime(dt_format="iso8601"),
+        "last_seen": fields.DateTime(dt_format="iso8601"),
+        "other_accounts": fields.List(fields.Nested(_linked_account_model)),
+    },
+)
+_account_links_model = api.model(
+    "AccountLinks",
+    {
+        "user_id": fields.Integer(allow_null=True, description="The account looked up, when one was given."),
+        "networks": fields.List(
+            fields.Nested(_linked_network_model),
+            description="The account's networks in the last 30 days, the networks shared with other accounts first.",
+        ),
+        "accounts": fields.List(
+            fields.Nested(_linked_account_model),
+            description="The accounts seen on the given network pseudonym in the last 30 days.",
+        ),
+    },
+)
 
 
 def _find_sharedkey_or_raise(sharedkey_id: str) -> UserSharedKey:
@@ -57,6 +95,13 @@ def _find_sharedkey_or_raise(sharedkey_id: str) -> UserSharedKey:
     if sharedkey is None:
         raise e.InvalidAPIKey("Shared Key Not Found.", keytype="Shared")
     return sharedkey
+
+
+def _find_user_or_raise(user_id: int) -> User:
+    user = database.find_user_by_id(user_id)
+    if user is None:
+        raise e.UserNotFound(str(user_id))
+    return user
 
 
 class OperationsSharedKey(Resource):
@@ -135,3 +180,49 @@ class OperationsSharedKey(Resource):
             "sharedkey": sharedkey.get_details(include_private_policy=True),
         }
         return payload, 200, PRIVATE_HEADERS
+
+
+class OperationsAccountLinks(Resource):
+    """Let moderators see which accounts share networks."""
+
+    decorators = _moderator_limits()
+
+    get_parser = reqparse.RequestParser()
+    _add_moderator_credentials(get_parser)
+    get_parser.add_argument("user_id", type=int, required=False, location="args", help="List this account's networks.")
+    get_parser.add_argument(
+        "ip_subject_key",
+        type=str,
+        required=False,
+        location="args",
+        help="List the accounts seen on this network pseudonym, as shown on prompt evidence.",
+    )
+
+    @api.expect(get_parser)
+    @api.marshal_with(_account_links_model, code=200, description="Linked accounts")
+    @api.response(400, "Validation Error", models.response_model_error)
+    @api.response(401, "Invalid API Key", models.response_model_error)
+    @api.response(403, "Access Denied", models.response_model_error)
+    @api.response(404, "User Not Found", models.response_model_error)
+    def get(self) -> tuple[dict[str, Any], int, dict[str, str]]:
+        """Return an account's networks with the other accounts on each, or the accounts on one network.
+
+        Returns:
+            The listing. Exactly one of user_id and ip_subject_key must be given.
+
+        Raises:
+            e.BadRequest: Neither or both filters were given, or the pseudonym is malformed.
+        """
+        self.args = self.get_parser.parse_args()
+        check_for_mod(self.args.apikey, "GET OperationsAccountLinks")
+        subject_key = _assert_ip_subject_key(self.args.ip_subject_key)
+        has_user_filter = self.args.user_id is not None
+        has_subject_filter = subject_key is not None
+        if has_user_filter == has_subject_filter:
+            raise e.BadRequest("Give exactly one of user_id and ip_subject_key.", rc="InvalidAccountLinkFilter")
+        if has_user_filter:
+            _find_user_or_raise(self.args.user_id)
+            networks = [asdict(network) for network in list_account_links(self.args.user_id)]
+            return {"user_id": self.args.user_id, "networks": networks, "accounts": []}, 200, PRIVATE_HEADERS
+        accounts = [asdict(account) for account in list_subject_accounts(subject_key)]
+        return {"user_id": None, "networks": [], "accounts": accounts}, 200, PRIVATE_HEADERS

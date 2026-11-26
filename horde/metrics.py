@@ -1088,6 +1088,19 @@ kudos_transfers_idempotent_replays = logfire.metric_counter(
     unit="1",
     description="transfer_kudos calls short-circuited as an idempotent replay",
 )
+kudos_transfers_completed = logfire.metric_counter(
+    "horde.kudos.transfers",
+    unit="1",
+    description=(
+        "Completed kudos transfers, by horde.transfer_type (gifted, donated) and horde.link_status (unlinked, linked, "
+        "exempt). An idempotent replay is not counted again"
+    ),
+)
+kudos_transfers_kudos = logfire.metric_counter(
+    "horde.kudos.transfers.kudos",
+    unit="kudos",
+    description="Kudos moved by completed transfers, by horde.transfer_type and horde.link_status",
+)
 moderation_evidence_captured = logfire.metric_counter(
     "horde.moderation.evidence.captured",
     unit="1",
@@ -1179,7 +1192,33 @@ sharedkey_legacy_requests = logfire.metric_counter(
     description="Generation requests through a shared key without a role list",
 )
 
-# --- registration reCAPTCHA ---------------------------------------------------
+# --- linked accounts -----------------------------------------------------------
+account_links_decisions = logfire.metric_counter(
+    "horde.account_links.decisions",
+    unit="1",
+    description=(
+        "Decisions of the linked-account policies, by horde.policy (pseudonymous_registration, oauth_registration, "
+        "kudos_transfer, style_surcharge) and horde.outcome (allowed, refused, flagged, advisory, verified)"
+    ),
+)
+account_links_shared_network_generations = logfire.metric_counter(
+    "horde.account_links.shared_network_generations",
+    unit="1",
+    description=(
+        "Completed generations where the requester and the worker were on the same network and are different "
+        "accounts, by horde.requester (registered, anonymous)"
+    ),
+)
+account_links_shared_network_generation_kudos = logfire.metric_counter(
+    "horde.account_links.shared_network_generations.kudos",
+    unit="kudos",
+    description="Kudos of the generations counted in horde.account_links.shared_network_generations, by horde.requester",
+)
+account_links_purged = logfire.metric_counter(
+    "horde.account_links.purged",
+    unit="1",
+    description="Account and network pseudonym pairs deleted after the retention window",
+)
 recaptcha_verifications = logfire.metric_counter(
     "horde.recaptcha.verifications",
     unit="1",

@@ -26,3 +26,16 @@ SET roles = '["trusted", "education", "special", "service"]'::jsonb
 WHERE roles IS NULL
   AND user_id IN (SELECT user_id FROM user_roles WHERE user_role = 'SERVICE' AND value);
 
+-- Pseudonymous links between accounts and the networks where they were seen. The
+-- subject key is an HMAC of the network. It does not store the address. Rows older
+-- than 30 days are purged by the application.
+CREATE TABLE IF NOT EXISTS ip_subject_account_links (
+  id BIGSERIAL PRIMARY KEY,
+  subject_key VARCHAR(64) NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  first_seen TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT timezone('utc', now()),
+  last_seen TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT timezone('utc', now()),
+  CONSTRAINT uq_ip_subject_account_link UNIQUE (subject_key, user_id)
+);
+CREATE INDEX IF NOT EXISTS ix_ip_subject_account_links_user_id ON ip_subject_account_links (user_id);
+CREATE INDEX IF NOT EXISTS ix_ip_subject_account_links_last_seen ON ip_subject_account_links (last_seen);

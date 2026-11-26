@@ -77,6 +77,8 @@ def start_background_threads():
     # store. While the store is reachable, the interval bounds how long text stays in the row.
     PrimaryTimedFunction(5, threads.upload_moderation_evidence_text, quorum=quorum)
     PrimaryTimedFunction(3600, threads.prune_compiled_stats, quorum=quorum)
+    # Each tick deletes one bounded batch, so a day's expired links clear within minutes at the usual volume.
+    PrimaryTimedFunction(60, threads.purge_account_links, quorum=quorum)
     PrimaryTimedFunction(10, threads.increment_extra_priority, quorum=quorum)
     PrimaryTimedFunction(10, threads.store_compiled_filter_regex, quorum=quorum)
     PrimaryTimedFunction(10, threads.store_compiled_filter_regex_replacements, quorum=quorum)

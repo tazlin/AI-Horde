@@ -748,6 +748,16 @@ COMPILED_STATS_RETENTION = timedelta(days=7)
 
 
 @logger.catch(reraise=True)
+def purge_account_links() -> None:
+    """Delete account and network pairs last seen before the retention window, one bounded batch per tick."""
+    from horde.account_links import purge_expired_account_links
+
+    with get_app().app_context():
+        purge_expired_account_links()
+        db.session.commit()
+
+
+@logger.catch(reraise=True)
 def prune_compiled_stats():
     """Prunes old rows from the precompiled stats tables, always keeping the latest snapshot.
 

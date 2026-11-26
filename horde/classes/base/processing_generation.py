@@ -559,6 +559,16 @@ class ProcessingGeneration(db.Model):
             settlement_gentype = "chat" if getattr(self.wp, "is_chat", False) else self.procgen_type
             log_string += f" gentype={settlement_gentype}"
             logger.info(log_string)
+        from horde.account_links import report_shared_network_generation
+
+        report_shared_network_generation(
+            requester=self.wp.user,
+            requester_ipaddr=self.wp.ipaddr,
+            worker_owner_id=self.worker.user_id,
+            worker_id=str(self.worker.id),
+            worker_ipaddr=self.worker.ipaddr,
+            kudos=kudos,
+        )
 
     def adjust_user_kudos(self, kudos):
         if self.censored:

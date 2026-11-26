@@ -242,6 +242,7 @@ KNOWN_RC = [
     "SharedKeyRoleNotHeld",
     "SharedKeyStatusForbidden",
     "SharedKeyModeratorSuspension",
+    "InvalidAccountLinkFilter",
 ]
 
 

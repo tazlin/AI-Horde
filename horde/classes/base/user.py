@@ -1297,6 +1297,17 @@ class User(db.Model):
         except ValueError:
             return False
 
+    @classmethod
+    def pseudonymous_condition(cls) -> ColumnElement[bool]:
+        """Return a query condition that matches pseudonymous accounts.
+
+        A pseudonymous registration stores ``str(uuid4())`` as its ``oauth_id``. The pattern matches that form, which has
+        groups of 8, 4, 4, 4 and 12 characters joined by hyphens. OAuth IDs have a provider prefix such as ``g_``, so
+        they do not match it. ``is_pseudonymous`` also accepts other spellings of a UUID, which registration does not
+        write.
+        """
+        return cls.oauth_id.like("________-____-____-____-____________")
+
     def get_concurrency(self, models_requested=None, models_dict=None):
         if not models_requested:
             models_requested = []

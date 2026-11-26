@@ -68,6 +68,7 @@ api.add_resource(moderation.OperationsPromptEvents, "/operations/moderation/prom
 api.add_resource(moderation.OperationsPromptNotes, "/operations/moderation/prompts/<int:event_id>/notes")
 api.add_resource(moderation.OperationsWorkerSuspicionEvents, "/operations/moderation/worker_suspicion_events")
 api.add_resource(access_operations.OperationsSharedKey, "/operations/moderation/sharedkeys/<string:sharedkey_id>")
+api.add_resource(access_operations.OperationsAccountLinks, "/operations/moderation/account_links")
 api.add_resource(stable.Interrogate, "/interrogate/async")
 api.add_resource(stable.InterrogationStatus, "/interrogate/status/<string:id>")
 api.add_resource(stable.InterrogatePop, "/interrogate/pop")

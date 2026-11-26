@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 import horde.classes.base.stats as stats
 from horde import vars as hv
+from horde.account_links import AccountLinkPolicy, assess_linked_transfer, report_linked_transfer
 from horde.bridge_reference import (
     check_bridge_capability,
     get_supported_samplers,
@@ -72,7 +73,9 @@ from horde.flask import SQLITE_MODE, db
 from horde.horde_redis import horde_redis as hr
 from horde.logger import logger
 from horde.metrics import (
+    kudos_transfers_completed,
     kudos_transfers_idempotent_replays,
+    kudos_transfers_kudos,
     pop_query_duration,
     record_request_assignment_pressure,
     worker_availability_cache_lookups,
@@ -913,6 +916,21 @@ def transfer_kudos(
     amount: float,
     idempotency_key: str | None = None,
 ) -> KudosTransferResult:
+    """Move kudos from one account to another, and record the transfer metrics.
+
+    A transfer between linked accounts is not refused. It is reported for review by
+    ``account_links.report_linked_transfer``. An idempotent replay is not counted or reported again.
+
+    Args:
+        source_user: The sender.
+        dest_user: The receiver.
+        amount: The kudos to move.
+        idempotency_key: A client key that makes a retried transfer return the first result.
+
+    Returns:
+        The kudos moved, a message, the return code of a refusal or None, and on success whether the call replayed an
+        earlier transfer.
+    """
     reverse_transfer = hr.horde_r_get(f"kudos_transfer_{dest_user.id}-{source_user.id}")
     if reverse_transfer:
         return [
@@ -1021,6 +1039,12 @@ def transfer_kudos(
         db.session.commit()
     hr.horde_r_setex(f"kudos_transfer_{source_user.id}-{dest_user.id}", timedelta(seconds=60), 1)
     logger.info(f"{source_user.get_unique_alias()} transfered {amount} kudos to {dest_user.get_unique_alias()}")
+    # Assessed after the commit, so a refused transfer or an idempotent replay does not query the account links.
+    link_assessment = assess_linked_transfer(source_user, dest_user)
+    transfer_attributes = {"horde.transfer_type": transfer_type, "horde.link_status": link_assessment.status.value}
+    kudos_transfers_completed.add(1, transfer_attributes)
+    kudos_transfers_kudos.add(amount, transfer_attributes)
+    report_linked_transfer(link_assessment, source_user, dest_user, policy=AccountLinkPolicy.KUDOS_TRANSFER, amount=amount)
     return [amount, "OK", None, False]
 
 

@@ -16,6 +16,7 @@ class Suspicions(IntEnum):
     USERNAME_PROFANITY = 7
     CORRUPT_PROMPT = 8
     TOO_MANY_JOBS_ABORTED = 9
+    LINKED_TO_RESTRICTED_ACCOUNT = 10
 
 
 SUSPICION_LOGS = {
@@ -29,4 +30,5 @@ SUSPICION_LOGS = {
     Suspicions.USERNAME_PROFANITY: "Profanity in username",
     Suspicions.CORRUPT_PROMPT: "Corrupt Prompt detected",
     Suspicions.TOO_MANY_JOBS_ABORTED: "Too many jobs aborted in a short amount of time",
+    Suspicions.LINKED_TO_RESTRICTED_ACCOUNT: "Registered from a network recently used by a flagged or deleted account",
 }

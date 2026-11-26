@@ -25,6 +25,7 @@ The errors returned by the AI horde are always in this json format
 
 | RC | Explanation |
 | -- | ----------- |
+| InvalidAccountLinkFilter | The account link listing needs exactly one of user_id and ip_subject_key |
 | InvalidSharedKeyPolicy | A shared key's scopes, roles, models, networks, limits or status are malformed or out of range |
 | MissingPrompt | The generation prompt was not given |
 | CorruptPrompt | The prompts was rejected as unethical |

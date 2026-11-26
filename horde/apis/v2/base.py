@@ -39,6 +39,12 @@ from horde.access_control import (
     record_legacy_sharedkey_request,
     refuse_sharedkey_request,
 )
+from horde.account_links import (
+    AccountLinkPolicy,
+    assess_linked_transfer,
+    record_account_link,
+    report_linked_transfer,
+)
 from horde.apis.models.v2 import Models, Parsers
 from horde.apis.request_utils import get_current_passkey_owner, get_remoteaddr
 from horde.argparser import args
@@ -352,6 +358,7 @@ class GenerateTemplate(Resource):
                 self.validate()
             finally:
                 generate_validate_duration.record(time.monotonic() - tv, {"horde.gentype": self.gentype})
+        self._record_generation_link()
         self.downgrade_wp_priority = False
         self.wp = None
         try:
@@ -385,6 +392,7 @@ class GenerateTemplate(Resource):
                 # stale-request cleanup after it expires.
                 logger.exception("Could not delete the waiting prompt of a failed admission.")
             raise
+        self.report_linked_style_surcharge()
         # We use the wp.kudos to avoid calling the model twice.
         self.kudos = self.wp.kudos
 
@@ -697,6 +705,18 @@ class GenerateTemplate(Resource):
         #             message = (f"The trigger '{csam_trigger_check}' has been detected to generate "
         #                       "unethical images on its own and as such has had to be prevented from use. "
         #                        "Thank you for understanding.")
+
+    def _record_generation_link(self) -> None:
+        """Record the account on the request's network, for the linked-account policies.
+
+        The record joins the transaction that commits the inactive waiting prompt, so it does not add a commit. A dry
+        run is not recorded. A request made through a shared key, or funded by a style's key, is not recorded either.
+        The key's holder is not the owner, and recording the request would link the owner to every network where the
+        key is used.
+        """
+        if self.args.dry_run or self.sharedkey is not None:
+            return
+        record_account_link(self.user, self.user_ip, throttle=True)
 
     def _style_sharedkey_admits_request(self) -> bool:
         """Return whether the style's shared key allows this request.
@@ -1093,6 +1113,26 @@ class GenerateTemplate(Resource):
             author_id=self.existing_style.user_id,
             amount=Decimal(STYLE_OWNER_REWARD),
             style_type=self.existing_style.style_type,
+        )
+
+    def report_linked_style_surcharge(self) -> None:
+        """Report a style surcharge paid to a style author who shares a network with the requester.
+
+        The surcharge is reported as a transfer between linked accounts. The request is not affected.
+
+        Performance:
+            One query on the account links for an activated request with a surcharge, and none for other requests.
+        """
+        if not self.style_kudos or self.existing_style is None:
+            return
+        author = self.existing_style.user
+        assessment = assess_linked_transfer(self.user, author)
+        report_linked_transfer(
+            assessment,
+            self.user,
+            author,
+            policy=AccountLinkPolicy.STYLE_SURCHARGE,
+            amount=float(STYLE_OWNER_REWARD),
         )
 
     def get_supplied_template_fields(self):
@@ -1823,6 +1863,7 @@ class TransferKudos(Resource):
         user = database.find_user_by_api_key(self.args["apikey"])
         if not user:
             raise e.InvalidAPIKey("kudos transfer to: " + self.args["username"])
+        record_account_link(user, get_remoteaddr(), commit=True)
         ret = database.transfer_kudos_from_apikey_to_username(
             self.args["apikey"],
             self.args["username"],

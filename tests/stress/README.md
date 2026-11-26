@@ -58,6 +58,10 @@ that re-export the User classes Locust should discover:
   non-streamed and impatient clients while simulated chat workers serve the
   Horde instances behind it. `run_chat_scale_demo.sh` wraps it with the
   processes it needs. See [Chat front scale demo](#chat-front-scale-demo).
+- `locustfile_access_control.py` uses one shared key with a concurrency limit
+  from several holders while its owner suspends and reactivates it, moves kudos
+  between requestor accounts on one network, and reads the moderator link
+  listing. See [Shared key and linked account scenario](#shared-key-and-linked-account-scenario).
 
 ## Prerequisites
 
@@ -1004,3 +1008,40 @@ or `too many clients already` in a Horde log mean Postgres connections were.
 instance stopped answering. `run.env` records the settings and the open file
 limit the run had.
 
+## Shared key and linked account scenario
+
+`locustfile_access_control.py` puts load on the shared key policies and the
+linked-account checks together. At test start the owner key creates one shared
+key that can only generate images, with `--access-max-concurrency` as its
+limit. Then four kinds of user run:
+
+- **SharedKeyHolder:** submits image requests through the key and cancels each
+  one a few seconds later. A suspension or the concurrency limit refuses some
+  of them, and those refusals are counted as expected.
+- **SharedKeyOwner:** suspends the key for a few seconds and reactivates it,
+  and checks the concurrency invariant.
+- **LinkedAccountFarmer:** generates with the requestor accounts and moves one
+  kudos at a time between them. Every user runs from the load host's address,
+  so on a target with a real `secret_key` set the accounts are linked. A link
+  does not refuse a transfer, so a refusal other than the transfer rate limit
+  or a lack of kudos fails the run. The target reports each linked transfer with the
+  `horde.account_links.linked_transfer` event, and `horde.kudos.transfers`
+  counts it with `horde.link_status` set to `linked`.
+- **LinkReviewer:** reads the moderator link listing for the requestor accounts
+  while new links are written.
+
+```
+PYTHONPATH=. locust -f tests/stress/locustfile_access_control.py --host http://localhost:7001 \
+    --headless --users 10 --spawn-rate 2 --run-time 10m \
+    --requestor-api-keys R1,R2,R3 --horde-models "Some Model" \
+    --access-owner-api-key O --access-moderator-api-key M \
+    --access-max-concurrency 4 --access-key-kudos 2000 \
+    --access-holders 6 --access-owners 1 --access-farmers 2 --access-reviewers 1
+```
+
+The run passes when the Locust statistics do not show failures. The concurrency
+check is the `[invariant] sharedkey concurrency` row. The limit is checked before
+the new request is stored, so requests checked at the same moment can each pass.
+The check allows the limit plus one request per holder for that reason, and a
+count above that is a failure. Use requestor accounts that are not trusted,
+since trusted accounts skip the linked-account check.

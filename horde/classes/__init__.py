@@ -9,6 +9,7 @@ from sqlalchemy.sql import text
 
 import horde.classes.base.stats  # noqa 401
 from horde.argparser import args
+from horde.classes.base.account_link import IpSubjectAccountLink  # noqa: F401
 from horde.classes.base.detection import Filter  # noqa 401
 from horde.classes.base.kudos import (  # noqa 401
     KudosBalanceSnapshot,
