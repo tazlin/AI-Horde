@@ -9,7 +9,14 @@
 SET lock_timeout = '3s';
 
 ALTER TABLE user_sharedkeys
-  ADD COLUMN IF NOT EXISTS roles JSONB;
+  ADD COLUMN IF NOT EXISTS scopes JSONB,
+  ADD COLUMN IF NOT EXISTS roles JSONB,
+  ADD COLUMN IF NOT EXISTS allowed_models JSONB,
+  ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT -1,
+  ADD COLUMN IF NOT EXISTS allowed_networks JSONB,
+  ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'active',
+  ADD COLUMN IF NOT EXISTS status_reason VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS status_changed TIMESTAMP WITHOUT TIME ZONE;
 
 -- A key without a role list does not act with the service role. Each existing key of a service account gets a role
 -- list with every grantable role, so it keeps the allowances that it had before 6.1.0. The request still acts only

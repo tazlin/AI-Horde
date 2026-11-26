@@ -37,7 +37,16 @@ SERVICE_OWNER_KEY_ID = "00000000-0000-0000-0000-0000000000bb"
 """An existing key of a service account."""
 REVOKED_SERVICE_OWNER_KEY_ID = "00000000-0000-0000-0000-0000000000cc"
 """An existing key of an account with a service role row whose value is false."""
-NEW_SHAREDKEY_COLUMNS = ("roles",)
+NEW_SHAREDKEY_COLUMNS = (
+    "scopes",
+    "roles",
+    "allowed_models",
+    "max_concurrency",
+    "allowed_networks",
+    "status",
+    "status_reason",
+    "status_changed",
+)
 """The columns added to ``user_sharedkeys`` by the migration."""
 ABSENT = "<absent>"
 
@@ -94,17 +103,18 @@ def migrated_schema(pg_dsn: str) -> Iterator[sqlalchemy.Connection]:
 
 
 def test_an_existing_key_is_a_legacy_key_that_keeps_working(migrated_schema: sqlalchemy.Connection) -> None:
-    """Keys in use on the day of the deploy must keep their owner's roles.
+    """Keys in use on the day of the deploy must stay active and unlimited, and keep their owner's roles.
 
     A NULL role list means the owner's roles.
     """
     row = migrated_schema.execute(
         sqlalchemy.text(
-            "SELECT roles FROM user_sharedkeys WHERE user_id = 1",
+            "SELECT scopes, roles, allowed_models, allowed_networks, max_concurrency, status, status_reason "
+            "FROM user_sharedkeys WHERE user_id = 1",
         ),
     ).one()
 
-    assert tuple(row) == (None,)
+    assert tuple(row) == (None, None, None, None, -1, "active", None)
 
 
 def _roles_of(connection: sqlalchemy.Connection, sharedkey_id: str) -> Any:

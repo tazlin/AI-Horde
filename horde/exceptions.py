@@ -233,8 +233,15 @@ KNOWN_RC = [
     "ChatProgressUnavailable",
     "ChatJobAborted",
     "NoEligibleWorker",
+    "SharedKeySuspended",
+    "SharedKeyScopeDenied",
+    "SharedKeyNetworkDenied",
+    "SharedKeyModelDenied",
+    "SharedKeyConcurrencyExceeded",
     "InvalidSharedKeyPolicy",
     "SharedKeyRoleNotHeld",
+    "SharedKeyStatusForbidden",
+    "SharedKeyModeratorSuspension",
 ]
 
 

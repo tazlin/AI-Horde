@@ -7,7 +7,7 @@ from typing import Any, override
 
 from flask_restx import fields, reqparse
 
-from horde.access_control import SharedKeyRole
+from horde.access_control import OWNER_SETTABLE_STATUSES, SharedKeyLimits, SharedKeyRole, SharedKeyScope, SharedKeyStatus
 from horde.classes.base.prompt_moderation import (
     MAX_NOTE_CHARACTERS,
     EvidenceHoldSource,
@@ -1209,6 +1209,12 @@ class Models:
         )
 
         sharedkey_policy_fields = {
+            "scopes": fields.List(
+                fields.String(enum=[scope.value for scope in SharedKeyScope]),
+                required=False,
+                min_items=1,
+                description="Request types allowed for this key. A new key may submit every type.",
+            ),
             "roles": fields.List(
                 fields.String(enum=[role.value for role in SharedKeyRole]),
                 required=False,
@@ -1217,6 +1223,25 @@ class Models:
                     "holds, and supporters hold the trusted role. Only a service account can grant the service role. A new "
                     "key does not have any role. Your account's restrictions always apply to the key, and the moderator "
                     "role cannot be granted."
+                ),
+            ),
+            "allowed_models": fields.List(
+                fields.String(example="stable_diffusion", min_length=1, max_length=SharedKeyLimits.MAX_MODEL_NAME_CHARACTERS),
+                required=False,
+                min_items=1,
+                max_items=SharedKeyLimits.MAX_ALLOWED_MODELS,
+                description=(
+                    "Models allowed for this key. A request through a style funded by this key runs the style's models "
+                    "regardless of this list. Leave out to keep the current list, or send null to allow any model."
+                ),
+            ),
+            "max_concurrency": fields.Integer(
+                min=-1,
+                max=SharedKeyLimits.MAX_CONCURRENCY,
+                required=False,
+                description=(
+                    "The most generations allowed to wait under this key at once. Your account's limit also applies. "
+                    "-1 means only your account's limit applies."
                 ),
             ),
         }
@@ -1269,6 +1294,25 @@ class Models:
                     description="The maximum amount of text tokens this key can generate per job. -1 means unlimited.",
                 ),
                 **sharedkey_policy_fields,
+                "allowed_networks": fields.List(
+                    fields.String(example="203.0.113.0/24"),
+                    required=False,
+                    min_items=1,
+                    max_items=SharedKeyLimits.MAX_ALLOWED_NETWORKS,
+                    description=(
+                        "The IP addresses or CIDR ranges from which this key may be used. An IPv6 client counts as its /64 "
+                        "network, so an IPv6 range must be /64 or wider. Leave out to keep the current list, or send "
+                        "null to allow any network."
+                    ),
+                ),
+                "status": fields.String(
+                    required=False,
+                    enum=sorted(status.value for status in OWNER_SETTABLE_STATUSES),
+                    description=(
+                        "Set to suspended_by_owner to stop the key working, or to active to reactivate it. A key "
+                        "suspended by a moderator cannot be reactivated by its owner."
+                    ),
+                ),
             },
         )
 
@@ -1319,6 +1363,7 @@ class Models:
                 "max_text_tokens": fields.Integer(
                     description="The maximum amount of text tokens this key can generate per job. -1 means unlimited.",
                 ),
+                **sharedkey_policy_fields,
                 "roles": fields.List(
                     fields.String(enum=[role.value for role in SharedKeyRole]),
                     allow_null=True,
@@ -1326,6 +1371,24 @@ class Models:
                         "The owner's roles granted to this key. Null for a key created before roles existed. Such a key "
                         "has every role in the list that its owner holds."
                     ),
+                ),
+                "status": fields.String(
+                    enum=[status.value for status in SharedKeyStatus],
+                    description="Whether the key is usable, and who suspended it.",
+                ),
+                "allowed_networks": fields.List(
+                    fields.String(),
+                    allow_null=True,
+                    description="The networks from which this key may be used. Only included for the owner and moderators.",
+                ),
+                "status_reason": fields.String(
+                    allow_null=True,
+                    description="Why the status last changed. Only included for the owner and moderators.",
+                ),
+                "status_changed": fields.DateTime(
+                    dt_format="rfc822",
+                    allow_null=True,
+                    description="When the status last changed. Only included for the owner and moderators.",
                 ),
             },
         )

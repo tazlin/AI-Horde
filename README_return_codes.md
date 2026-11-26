@@ -25,14 +25,21 @@ The errors returned by the AI horde are always in this json format
 
 | RC | Explanation |
 | -- | ----------- |
-| InvalidSharedKeyPolicy | A shared key's roles are malformed |
+| InvalidSharedKeyPolicy | A shared key's scopes, roles, models, networks, limits or status are malformed or out of range |
 | MissingPrompt | The generation prompt was not given |
 | CorruptPrompt | The prompts was rejected as unethical |
 | KudosValidationError | Something went wrong when transferring kudos. This is a base rc, so you should never typically see it. |
 | NoValidActions | Something went wrong when modifying an entity on the horde. This is a base rc, so you should never typically see it. |
 | InvalidSize | Requested image size is not a multiple of 64 |
 | InvalidPromptSize | Prompt is too large |
+| SharedKeyConcurrencyExceeded | The request would put more generations under the shared key than its owner allows |
+| SharedKeyModelDenied | The shared key is not allowed to request one of the given models |
+| SharedKeyModeratorSuspension | A moderator suspended the shared key, and only a moderator can reactivate it |
+| SharedKeyNetworkDenied | The shared key cannot be used from the requesting network |
 | SharedKeyRoleNotHeld | A shared key can only be granted roles that its owner holds |
+| SharedKeyScopeDenied | The shared key is not allowed to submit this type of request |
+| SharedKeyStatusForbidden | Only a moderator can set this shared key status |
+| SharedKeySuspended | The shared key was suspended by its owner or by a moderator |
 | TooManySteps | Too many steps requested for image generation |
 | Profanity | Profanity Detected. This is a base rc, so you should never typically see it.
 | ProfaneWorkerName | Profanity detected in worker name |

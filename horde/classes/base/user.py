@@ -20,7 +20,14 @@ from sqlalchemy.orm import Mapped, relationship
 from sqlalchemy.sql.elements import ColumnElement
 
 from horde import vars as hv
-from horde.access_control import SharedKeyRole
+from horde.access_control import (
+    ALL_SCOPES,
+    SharedKeyLimits,
+    SharedKeyRefusal,
+    SharedKeyRole,
+    SharedKeyScope,
+    SharedKeyStatus,
+)
 from horde.classes.base.kudos import (
     KudosAmount,
     StyleReward,
@@ -251,12 +258,32 @@ class UserSharedKey(db.Model):
     max_image_pixels = db.Column(db.Integer, default=-1, nullable=False)
     max_image_steps = db.Column(db.Integer, default=-1, nullable=False)
     max_text_tokens = db.Column(db.Integer, default=-1, nullable=False)
+    scopes = db.Column(_sharedkey_json_type, nullable=True)
+    """The request types that the key may submit. Null means every type."""
     roles = db.Column(_sharedkey_json_type, nullable=True)
     """The owner roles granted to the key.
 
     Null marks a key created before roles existed. Such a key has every role that its owner holds. A new key starts with
     an empty list.
     """
+    allowed_models = db.Column(_sharedkey_json_type, nullable=True)
+    """The models that the key may request. Null means any model."""
+    max_concurrency = db.Column(db.Integer, default=-1, server_default="-1", nullable=False)
+    """The most generations allowed to wait under the key. -1 means only the owner's limit applies."""
+    allowed_networks = db.Column(_sharedkey_json_type, nullable=True)
+    """The CIDR ranges that the key may be used from. Null means any network."""
+    status = db.Column(db.String(32), default="active", server_default="active", nullable=False)
+    """A [`SharedKeyStatus`][horde.access_control.SharedKeyStatus] value."""
+    status_reason = db.Column(db.String(SharedKeyLimits.MAX_STATUS_REASON_CHARACTERS), nullable=True)
+    """Why the key was last suspended or reinstated, as given by the owner or a moderator."""
+    status_changed = db.Column(db.DateTime, nullable=True)
+    """When the status last changed. Null when the status has not changed since the key was created."""
+
+    def get_scopes(self) -> list[SharedKeyScope]:
+        """Return the request types that the key may submit."""
+        if self.scopes is None:
+            return list(ALL_SCOPES)
+        return [SharedKeyScope(scope) for scope in self.scopes]
 
     def get_roles(self) -> list[SharedKeyRole] | None:
         """Return the owner roles granted to the key, or None for a key that has every role that its owner holds."""
@@ -264,12 +291,31 @@ class UserSharedKey(db.Model):
             return None
         return [SharedKeyRole(role) for role in self.roles]
 
+    def get_allowed_models(self) -> list[str] | None:
+        """Return the models that the key may request, or None when any model is allowed."""
+        if self.allowed_models is None:
+            return None
+        return list(self.allowed_models)
+
+    def get_allowed_networks(self) -> list[str] | None:
+        """Return the CIDR ranges that the key may be used from, or None when any network is allowed."""
+        if self.allowed_networks is None:
+            return None
+        return list(self.allowed_networks)
+
+    def get_status(self) -> SharedKeyStatus:
+        """Return the key's status."""
+        return SharedKeyStatus(self.status)
+
     @logger.catch(reraise=True)
-    def get_details(self, *, include_active_usage: bool = False) -> dict[str, Any]:
+    def get_details(self, *, include_active_usage: bool = False, include_private_policy: bool = False) -> dict[str, Any]:
         """Return shared-key metadata and optionally its owner's activity summary.
 
         Args:
             include_active_usage: Whether to include activity. The caller must authenticate the owner first.
+            include_private_policy: Whether to include the network allowlist and the status reason. The caller must
+                authenticate the owner or a moderator first, because the allowlist can reveal where the key's holders
+                connect from.
 
         Returns:
             Shared-key details ready for API serialization.
@@ -285,8 +331,16 @@ class UserSharedKey(db.Model):
             "max_image_pixels": self.max_image_pixels,
             "max_image_steps": self.max_image_steps,
             "max_text_tokens": self.max_text_tokens,
+            "scopes": [scope.value for scope in self.get_scopes()],
             "roles": None if roles is None else [role.value for role in roles],
+            "allowed_models": self.get_allowed_models(),
+            "max_concurrency": self.max_concurrency,
+            "status": self.get_status().value,
         }
+        if include_private_policy:
+            ret_dict["allowed_networks"] = self.get_allowed_networks()
+            ret_dict["status_reason"] = self.status_reason
+            ret_dict["status_changed"] = self.status_changed
         if include_active_usage:
             ret_dict["active_usage"] = asdict(self.get_active_usage())
         return ret_dict
@@ -366,13 +420,22 @@ class UserSharedKey(db.Model):
         if commit:
             db.session.commit()
 
-    def is_valid(self):
+    def is_valid(self) -> tuple[bool, str | None, str | None]:
+        """Return whether the key can be used at all, with the refusal message and return code when it cannot.
+
+        Suspension is checked first, so a suspended key without kudos is refused rather than downgraded to anonymous.
+
+        Returns:
+            Whether the key is usable, the message, and the return code.
+        """
+        status = self.get_status()
+        if status is not SharedKeyStatus.ACTIVE:
+            return False, f"This shared key is suspended ({status.value}).", SharedKeyRefusal.SUSPENDED.value
         if self.kudos == 0:
             return False, "This shared key has run out of kudos.", "SharedKeyEmpty"
         if self.is_expired():
             return False, "This shared key has expired", "SharedKeyExpired"
-        else:
-            return True, None, None
+        return True, None, None
 
     def is_expired(self) -> bool:
         """Returns true if the key has expired"""

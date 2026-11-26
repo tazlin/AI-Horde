@@ -29,9 +29,15 @@ from horde import exceptions as e
 from horde import metrics, r2
 from horde.access_control import (
     RequestPrincipal,
+    SharedKeyAccessRequest,
+    SharedKeyLimits,
+    SharedKeyRefusal,
+    SharedKeyStatus,
     check_owner_policy,
+    check_sharedkey_access,
     parse_policy_input,
     record_legacy_sharedkey_request,
+    refuse_sharedkey_request,
 )
 from horde.apis.models.v2 import Models, Parsers
 from horde.apis.request_utils import get_current_passkey_owner, get_remoteaddr
@@ -69,7 +75,7 @@ from horde.database import prompt_moderation
 from horde.database import text_functions as text_database
 from horde.database.kudos_retention import AccountingRetentionDisclosure
 from horde.database.prompt_moderation import PromptEvidence, PromptModerationReason, record_prompt_evidence
-from horde.database.sharedkeys import apply_policy_update
+from horde.database.sharedkeys import apply_policy_update, count_sharedkey_waiting, report_sharedkey_filtered_prompt
 from horde.detection import prompt_checker
 from horde.discord import moderation_event_url, send_problem_user_notification
 from horde.enums import KudosEntryType
@@ -487,6 +493,11 @@ class GenerateTemplate(Resource):
             )
         find_user_t0 = time.monotonic()
         # If this is set, it means we've already found an active shared key through an applied style.
+        self.sharedkey_via_style = self.sharedkey is not None
+        if self.sharedkey_via_style and not self._style_sharedkey_admits_request():
+            # When the style's key does not allow the request, the request runs on the caller's key.
+            self.sharedkey = None
+            self.sharedkey_via_style = False
         if self.sharedkey:
             self.user = self.sharedkey.user
             logger.debug(f"Using style-specified shared key {self.sharedkey.id} from user #{self.user.id}")
@@ -499,6 +510,8 @@ class GenerateTemplate(Resource):
                         self.apikey = "0000000000"
                         self.downgrade_wp_priority = True
                         self.user = database.find_user_by_api_key(self.apikey)
+                    elif rc in SharedKeyRefusal:
+                        raise refuse_sharedkey_request(error_msg, SharedKeyRefusal(rc))
                     else:
                         raise e.Forbidden(message=error_msg, rc=rc)
                 else:
@@ -508,6 +521,8 @@ class GenerateTemplate(Resource):
                         message="This shared key cannot be used as it has been assigned to specific styles only",
                         rc="SharedKeyAssignedStyles",
                     )
+                if self.sharedkey.user_id == self.user.id:
+                    self._check_sharedkey_access(via_style=False)
             if not self.user:
                 self.user = database.find_user_by_api_key(self.apikey)
         # logger.warning(datetime.utcnow())
@@ -582,6 +597,7 @@ class GenerateTemplate(Resource):
                 )
             else:
                 raise e.TooManyPrompts(self.username, wp_count + n, user_limit)
+        self._enforce_sharedkey_concurrency(n)
         ip_timeout = CounterMeasures.retrieve_timeout(self.user_ip)
         # logger.warning(datetime.utcnow())
         if ip_timeout:
@@ -620,9 +636,11 @@ class GenerateTemplate(Resource):
                     upload_prompt(prompt_dict)
                     acting_sharedkey = self._get_acting_sharedkey()
                     # A shared key's holder is not its owner, so the prompt counts against the holder's address and
-                    # is not held against the owner's account.
+                    # is reported for the key rather than held against the owner's account.
                     if acting_sharedkey is None:
                         self.user.report_suspicion(1, Suspicions.CORRUPT_PROMPT)
+                    else:
+                        report_sharedkey_filtered_prompt(acting_sharedkey)
                     logger.info(f"IP Address {self.user_ip} from user {self.username} going into timeout!")
                     CounterMeasures.report_suspicion(self.user_ip)
                 if self.proxied_request:
@@ -680,6 +698,42 @@ class GenerateTemplate(Resource):
         #                       "unethical images on its own and as such has had to be prevented from use. "
         #                        "Thank you for understanding.")
 
+    def _style_sharedkey_admits_request(self) -> bool:
+        """Return whether the style's shared key allows this request.
+
+        A style's key skips the model allowlist and the concurrency limit, because the style's owner chose the style's
+        models and the key holders are the style's users. The scopes and network allowlist still apply. The key's
+        status was checked when the style was applied.
+
+        Returns:
+            True when the key funds the request.
+        """
+        try:
+            self._check_sharedkey_access(via_style=True)
+        except e.Forbidden:
+            logger.debug(f"Style shared key {self.sharedkey.id} does not fund this request")
+            return False
+        return True
+
+    def _check_sharedkey_access(self, *, via_style: bool) -> None:
+        """Refuse a request that the shared key's policy does not allow.
+
+        Args:
+            via_style: Whether the key was supplied by the request's style.
+
+        Raises:
+            e.Forbidden: The key's policy refuses the request.
+        """
+        check_sharedkey_access(
+            self.sharedkey,
+            SharedKeyAccessRequest(
+                gentype=self.gentype,
+                models=self.models,
+                ip_subject=CounterMeasures.ip_subject(self.user_ip),
+                via_style=via_style,
+            ),
+        )
+
     def _get_acting_sharedkey(self) -> UserSharedKey | None:
         """Return the shared key used for the request, or None when the request uses the account's personal key.
 
@@ -689,6 +743,31 @@ class GenerateTemplate(Resource):
         if self.sharedkey is None or self.sharedkey.user_id != self.user.id:
             return None
         return self.sharedkey
+
+    def _enforce_sharedkey_concurrency(self, requested_generations: int) -> None:
+        """Refuse a request that would put more generations under the caller's shared key than its limit.
+
+        A style's key is not limited, as with the per-job size limits, because its holders are the style's users.
+
+        Args:
+            requested_generations: The generations this request adds.
+
+        Raises:
+            e.Forbidden: The key's concurrency limit would be exceeded.
+        """
+        sharedkey = self._get_acting_sharedkey()
+        if sharedkey is None or self.sharedkey_via_style:
+            return
+        if sharedkey.max_concurrency == SharedKeyLimits.UNLIMITED:
+            return
+        key_waiting = count_sharedkey_waiting(str(sharedkey.id))
+        requested_total = key_waiting + requested_generations
+        if requested_total > sharedkey.max_concurrency:
+            raise refuse_sharedkey_request(
+                f"This shared key is limited to {sharedkey.max_concurrency} waiting generations. "
+                f"This request would make it {requested_total}.",
+                SharedKeyRefusal.CONCURRENCY_EXCEEDED,
+            )
 
     def _handle_prompt_rejection(self, moderation_prompt: str, reason: PromptModerationReason) -> None:
         """Record a prompt rejection's evidence and apply the model-path timeout.
@@ -4025,7 +4104,7 @@ class SharedKey(Resource):
         if user.count_sharedkeys() >= user.max_sharedkeys():
             raise e.Forbidden(f"You cannot have more than {user.max_sharedkeys()} shared keys.")
         policy = parse_policy_input(request.get_json(silent=True))
-        check_owner_policy(policy, owner=user)
+        check_owner_policy(policy, owner=user, current_status=None)
         expiry = None
         if self.args.expiry and self.args.expiry != -1:
             expiry = datetime.utcnow() + timedelta(days=self.args.expiry)
@@ -4040,12 +4119,15 @@ class SharedKey(Resource):
             max_text_tokens=self.args.max_text_tokens,
             # A new key does not have any owner role until the owner grants one.
             roles=[],
+            max_concurrency=SharedKeyLimits.UNLIMITED,
+            # A key created with a status starts with it, so its creation is not reported as a status change.
+            status=(policy.status or SharedKeyStatus.ACTIVE).value,
         )
         db.session.add(new_key)
-        apply_policy_update(new_key, policy)
+        apply_policy_update(new_key, policy, actor_user_id=user.id)
         db.session.commit()
         user.refresh_cache()
-        return new_key.get_details(), 200
+        return new_key.get_details(include_private_policy=True), 200
 
 
 class SharedKeySingle(Resource):
@@ -4095,7 +4177,8 @@ class SharedKeySingle(Resource):
         owner = None
         if self.args.apikey:
             owner = database.find_user_by_api_key(self.args.apikey)
-        details = sharedkey.get_details(include_active_usage=owner is not None and owner.id == sharedkey.user_id)
+        is_owner = owner is not None and owner.id == sharedkey.user_id
+        details = sharedkey.get_details(include_active_usage=is_owner, include_private_policy=is_owner)
         return details, 200, {"Cache-Control": "private, no-store"}
 
     patch_parser = reqparse.RequestParser()
@@ -4183,7 +4266,7 @@ class SharedKeySingle(Resource):
 
         if no_valid_actions and no_valid_limit_actions and not policy.model_fields_set:
             raise e.NoValidActions("No shared key modification selected!", rc="NoSharedKeyModSelected")
-        check_owner_policy(policy, owner=user)
+        check_owner_policy(policy, owner=user, current_status=sharedkey.get_status())
         if self.args.expiry is not None:
             if self.args.expiry == -1:
                 sharedkey.expiry = None
@@ -4200,10 +4283,10 @@ class SharedKeySingle(Resource):
             sharedkey.max_image_steps = self.args.max_image_steps
         if self.args.max_text_tokens is not None:
             sharedkey.max_text_tokens = self.args.max_text_tokens
-        apply_policy_update(sharedkey, policy)
+        apply_policy_update(sharedkey, policy, actor_user_id=user.id)
 
         db.session.commit()
-        return sharedkey.get_details(), 200
+        return sharedkey.get_details(include_private_policy=True), 200
 
     delete_parser = reqparse.RequestParser()
     delete_parser.add_argument("apikey", type=str, required=True, help="User API key.", location="headers")

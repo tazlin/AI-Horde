@@ -1158,6 +1158,21 @@ moderation_retention_saturation = logfire.metric_counter(
 )
 
 # --- shared key access control -----------------------------------------------
+sharedkey_refusals = logfire.metric_counter(
+    "horde.sharedkey.refusals",
+    unit="1",
+    description="Generation requests refused by a shared key's policy, by horde.rc",
+)
+sharedkey_status_changes = logfire.metric_counter(
+    "horde.sharedkey.status_changes",
+    unit="1",
+    description="Shared key suspensions and reinstatements, by horde.actor (owner, moderator) and horde.status",
+)
+sharedkey_filtered_prompts = logfire.metric_counter(
+    "horde.sharedkey.filtered_prompts",
+    unit="1",
+    description="Generation requests through a shared key that the prompt filter refused",
+)
 sharedkey_legacy_requests = logfire.metric_counter(
     "horde.sharedkey.legacy_requests",
     unit="1",

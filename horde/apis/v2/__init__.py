@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+import horde.apis.v2.access_operations as access_operations
 import horde.apis.v2.base as base
 import horde.apis.v2.kobold as kobold
 import horde.apis.v2.kobold_styles as kobold_styles
@@ -66,6 +67,7 @@ api.add_resource(moderation.OperationsModeration, "/operations/moderation")
 api.add_resource(moderation.OperationsPromptEvents, "/operations/moderation/prompts")
 api.add_resource(moderation.OperationsPromptNotes, "/operations/moderation/prompts/<int:event_id>/notes")
 api.add_resource(moderation.OperationsWorkerSuspicionEvents, "/operations/moderation/worker_suspicion_events")
+api.add_resource(access_operations.OperationsSharedKey, "/operations/moderation/sharedkeys/<string:sharedkey_id>")
 api.add_resource(stable.Interrogate, "/interrogate/async")
 api.add_resource(stable.InterrogationStatus, "/interrogate/status/<string:id>")
 api.add_resource(stable.InterrogatePop, "/interrogate/pop")

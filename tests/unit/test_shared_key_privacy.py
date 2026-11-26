@@ -36,6 +36,14 @@ if TYPE_CHECKING:
 
 pytestmark: pytest.MarkDecorator = pytest.mark.unit
 
+OWNER_ONLY_FIELDS = frozenset(
+    {"active_usage", "allowed_networks", "status_reason", "status_changed"},
+)
+"""The shared key fields that only the owner sees.
+
+The network allowlist can reveal where holders connect. The status reason concerns how the holders use the key.
+"""
+
 
 @pytest.fixture(autouse=True)
 def environment(monkeypatch: pytest.MonkeyPatch, fake_redis: HordeRedis) -> None:
@@ -154,12 +162,12 @@ def test_only_owner_gets_usage_without_cross_credential_cache_leaks(
     assert summary["text"]["requests"] == 0
     assert str(wp.id) not in response.get_data(as_text=True)
     assert wp.prompt not in response.get_data(as_text=True)
-    owner_metadata = {field_name: field_value for field_name, field_value in response.json.items() if field_name != "active_usage"}
+    owner_metadata = {field_name: field_value for field_name, field_value in response.json.items() if field_name not in OWNER_ONLY_FIELDS}
     for headers in ({}, {"apikey": str(sharedkey.id)}, {"apikey": outsider_key}, {"apikey": "legacy-ignored-header"}):
         response = client.get(path, headers=headers)
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == "private, no-store"
-        assert "active_usage" not in response.json
+        assert OWNER_ONLY_FIELDS.isdisjoint(response.json)
         assert response.json == owner_metadata
     # Owner responses are fresh even when a public response was cached first.
     wp.n = 2
