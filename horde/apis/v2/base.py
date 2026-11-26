@@ -27,6 +27,12 @@ import horde.apis.limiter_api as lim
 import horde.classes.base.stats as stats
 from horde import exceptions as e
 from horde import metrics, r2
+from horde.access_control import (
+    RequestPrincipal,
+    check_owner_policy,
+    parse_policy_input,
+    record_legacy_sharedkey_request,
+)
 from horde.apis.models.v2 import Models, Parsers
 from horde.apis.request_utils import get_current_passkey_owner, get_remoteaddr
 from horde.argparser import args
@@ -63,6 +69,7 @@ from horde.database import prompt_moderation
 from horde.database import text_functions as text_database
 from horde.database.kudos_retention import AccountingRetentionDisclosure
 from horde.database.prompt_moderation import PromptEvidence, PromptModerationReason, record_prompt_evidence
+from horde.database.sharedkeys import apply_policy_update
 from horde.detection import prompt_checker
 from horde.discord import moderation_event_url, send_problem_user_notification
 from horde.enums import KudosEntryType
@@ -508,19 +515,21 @@ class GenerateTemplate(Resource):
         generate_validate_find_user_duration.record(time.monotonic() - find_user_t0, {"horde.gentype": self.gentype})
         if not self.user:
             raise e.InvalidAPIKey("generation")
-        if not self.user.service and self.args["proxied_account"]:
+        self.principal = RequestPrincipal(user=self.user, sharedkey=self._get_acting_sharedkey())
+        record_legacy_sharedkey_request(self.principal)
+        if not self.principal.service and self.args["proxied_account"]:
             raise e.BadRequest(message="Only service accounts can provide a proxied_account value.", rc="OnlyServiceAccountProxy")
         if self.user.deleted:
             raise e.Forbidden(message="This account has been scheduled for deletion and is disabled.", rc="DeletedUser")
         if self.args.extra_source_images is not None and len(self.args.extra_source_images) > 0:
             if len(self.args.extra_source_images) > 5:
                 raise e.BadRequest("You can send a maximum of 5 extra source images.", rc="TooManyExtraSourceImages")
-            if len(self.args.extra_source_images) > 1 and not self.user.trusted and not patrons.is_patron(self.user.id):
+            if len(self.args.extra_source_images) > 1 and not self.principal.trusted and not self.principal.is_patron:
                 raise e.BadRequest(
                     "Only trusted users and patrons can send more than 1 extra source images.",
                     rc="MoreThanMinExtraSourceImage",
                 )
-        if self.user.education or self.user.trusted or self.user.service:
+        if self.principal.education or self.principal.trusted or self.principal.service:
             if not self.proxied_request:
                 lim.dynamic_ip_whitelist.whitelist_ip(self.user_ip)
         self.username = self.user.get_unique_alias()
@@ -555,7 +564,7 @@ class GenerateTemplate(Resource):
         n = 1
         if self.args.params:
             n = self.args.params.get("n", 1)
-        if n > 1 and self.args["disable_batching"] is True and not self.user.trusted and not patrons.is_patron(self.user.id):
+        if n > 1 and self.args["disable_batching"] is True and not self.principal.trusted and not self.principal.is_patron:
             raise e.BadRequest(message="Only trusted users and patreon supporters can disable batching.", rc="RequiresTrust")
         user_limit = self.user.get_concurrency(self.args["models"], database.retrieve_available_models)
         # logger.warning(datetime.utcnow())
@@ -591,7 +600,7 @@ class GenerateTemplate(Resource):
         prompt_replaced = False
         if prompt_suspicion >= 2 and self.gentype != "text":
             # if replacement filter mode is enabled AND prompt is short enough, do that instead
-            if self.args.replacement_filter or self.user.education:
+            if self.args.replacement_filter or self.principal.education:
                 if not prompt_checker.check_prompt_replacement_length(self.prompt):
                     self._handle_prompt_rejection(moderation_prompt, PromptModerationReason.FILTER_REJECTION)
                     raise e.BadRequest("Prompt has to be below 7000 chars when replacement filter is on")
@@ -601,15 +610,19 @@ class GenerateTemplate(Resource):
                     prompt_replaced = True
             if not prompt_replaced:
                 self._handle_prompt_rejection(moderation_prompt, PromptModerationReason.FILTER_REJECTION)
-                # Moderators do not get ip blocked to allow for experiments
-                if not self.user.moderator:
+                # Moderators do not get ip blocked to allow for experiments. Requests through a moderator's shared key are blocked.
+                if not self.principal.moderator:
                     prompt_dict = {
                         "prompt": self.prompt,
                         "user": self.username,
                         "type": "regex",
                     }
                     upload_prompt(prompt_dict)
-                    self.user.report_suspicion(1, Suspicions.CORRUPT_PROMPT)
+                    acting_sharedkey = self._get_acting_sharedkey()
+                    # A shared key's holder is not its owner, so the prompt counts against the holder's address and
+                    # is not held against the owner's account.
+                    if acting_sharedkey is None:
+                        self.user.report_suspicion(1, Suspicions.CORRUPT_PROMPT)
                     logger.info(f"IP Address {self.user_ip} from user {self.username} going into timeout!")
                     CounterMeasures.report_suspicion(self.user_ip)
                 if self.proxied_request:
@@ -667,6 +680,16 @@ class GenerateTemplate(Resource):
         #                       "unethical images on its own and as such has had to be prevented from use. "
         #                        "Thank you for understanding.")
 
+    def _get_acting_sharedkey(self) -> UserSharedKey | None:
+        """Return the shared key used for the request, or None when the request uses the account's personal key.
+
+        A key that ran out of kudos and was downgraded leaves the request on the anonymous account. That account is not the
+        key's owner, so the key is not used for the request.
+        """
+        if self.sharedkey is None or self.sharedkey.user_id != self.user.id:
+            return None
+        return self.sharedkey
+
     def _handle_prompt_rejection(self, moderation_prompt: str, reason: PromptModerationReason) -> None:
         """Record a prompt rejection's evidence and apply the model-path timeout.
 
@@ -679,7 +702,7 @@ class GenerateTemplate(Resource):
             reason: Why the prompt was rejected.
         """
         event_id = self._record_prompt_rejection(moderation_prompt, reason)
-        if reason is not PromptModerationReason.MODEL_REJECTION or self.user.moderator:
+        if reason is not PromptModerationReason.MODEL_REJECTION or self.principal.moderator:
             return
         rejection_count = CounterMeasures.count_model_rejection(self.user_ip)
         timeout_threshold = prompt_moderation.MODEL_REJECTION_TIMEOUT_THRESHOLD
@@ -4001,6 +4024,8 @@ class SharedKey(Resource):
             raise e.AnonForbidden
         if user.count_sharedkeys() >= user.max_sharedkeys():
             raise e.Forbidden(f"You cannot have more than {user.max_sharedkeys()} shared keys.")
+        policy = parse_policy_input(request.get_json(silent=True))
+        check_owner_policy(policy, owner=user)
         expiry = None
         if self.args.expiry and self.args.expiry != -1:
             expiry = datetime.utcnow() + timedelta(days=self.args.expiry)
@@ -4013,8 +4038,11 @@ class SharedKey(Resource):
             max_image_pixels=self.args.max_image_pixels,
             max_image_steps=self.args.max_image_steps,
             max_text_tokens=self.args.max_text_tokens,
+            # A new key does not have any owner role until the owner grants one.
+            roles=[],
         )
         db.session.add(new_key)
+        apply_policy_update(new_key, policy)
         db.session.commit()
         user.refresh_cache()
         return new_key.get_details(), 200
@@ -4151,9 +4179,11 @@ class SharedKeySingle(Resource):
         no_valid_limit_actions = (
             self.args.max_image_pixels is None and self.args.max_image_steps is None and self.args.max_text_tokens is None
         )
+        policy = parse_policy_input(request.get_json(silent=True))
 
-        if no_valid_actions and no_valid_limit_actions:
+        if no_valid_actions and no_valid_limit_actions and not policy.model_fields_set:
             raise e.NoValidActions("No shared key modification selected!", rc="NoSharedKeyModSelected")
+        check_owner_policy(policy, owner=user)
         if self.args.expiry is not None:
             if self.args.expiry == -1:
                 sharedkey.expiry = None
@@ -4170,6 +4200,7 @@ class SharedKeySingle(Resource):
             sharedkey.max_image_steps = self.args.max_image_steps
         if self.args.max_text_tokens is not None:
             sharedkey.max_text_tokens = self.args.max_text_tokens
+        apply_policy_update(sharedkey, policy)
 
         db.session.commit()
         return sharedkey.get_details(), 200

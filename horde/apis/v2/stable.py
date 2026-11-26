@@ -17,6 +17,7 @@ from loguru import logger
 import horde.apis.limiter_api as lim
 import horde.classes.base.stats as stats
 from horde import exceptions as e
+from horde.access_control import SharedKeyRole
 from horde.apis.models.stable_v2 import ImageModels, ImageParsers
 from horde.apis.v2.base import (
     STYLE_OWNER_REWARD,
@@ -206,11 +207,17 @@ class ImageAsyncGenerate(GenerateTemplate):
         # Validated against the models the job will actually run on, which is what ImageWaitingPrompt is
         # built with below. A style replaces both the params and the model list, so reading the request's
         # own list here would check the style's settings against models it is not going to use.
-        param_validator = ParamValidator(prompt=self.prompt, models=self.models, params=self.params, user=self.user)
+        param_validator = ParamValidator(
+            prompt=self.prompt,
+            models=self.models,
+            params=self.params,
+            user=self.user,
+            key_grants_special=self.principal.key_allows(SharedKeyRole.SPECIAL),
+        )
         self.warnings = param_validator.validate_image_params()
         param_validator.check_for_special()
         # During raids, we prevent VPNs
-        if settings.mode_raid() and not self.user.trusted and not patrons.is_patron(self.user.id):
+        if settings.mode_raid() and not self.principal.trusted and not self.principal.is_patron:
             self.safe_ip = CounterMeasures.is_ip_safe(self.user_ip)
             # We allow unsafe IPs when being rate limited as they're only temporary
             if self.safe_ip is None:
@@ -218,7 +225,7 @@ class ImageAsyncGenerate(GenerateTemplate):
             # We actually block unsafe IPs for now to combat CP
             if not self.safe_ip:
                 raise e.NotTrusted(rc="UntrustedUnsafeIP")
-        if not self.user.special and self.params.get("special"):
+        if not self.principal.special and self.params.get("special"):
             raise e.BadRequest("Only special users can send a special field.", rc="SpecialFieldNeedsSpecialUser")
         if not self.args.source_image and self.args.source_mask:
             raise e.SourceMaskUnnecessary

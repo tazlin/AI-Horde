@@ -14,12 +14,13 @@ from typing import Any
 
 import dateutil.relativedelta
 from sqlalchemy import Enum, UniqueConstraint, and_, exists, false, func, select
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, relationship
 from sqlalchemy.sql.elements import ColumnElement
 
 from horde import vars as hv
+from horde.access_control import SharedKeyRole
 from horde.classes.base.kudos import (
     KudosAmount,
     StyleReward,
@@ -48,6 +49,7 @@ from horde.suspicions import SUSPICION_LOGS, Suspicions
 from horde.utils import generate_api_key, generate_client_id, get_db_uuid, is_profane, sanitize_string
 
 uuid_column_type = lambda: UUID(as_uuid=True) if not SQLITE_MODE else db.String(36)  # FIXME # noqa E731
+_sharedkey_json_type = db.JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
 
 # Which unit a STAT_RECORD posting denominates, by record type: request and
 # fulfilment and style rows count events; usage and contribution rows total
@@ -249,6 +251,18 @@ class UserSharedKey(db.Model):
     max_image_pixels = db.Column(db.Integer, default=-1, nullable=False)
     max_image_steps = db.Column(db.Integer, default=-1, nullable=False)
     max_text_tokens = db.Column(db.Integer, default=-1, nullable=False)
+    roles = db.Column(_sharedkey_json_type, nullable=True)
+    """The owner roles granted to the key.
+
+    Null marks a key created before roles existed. Such a key has every role that its owner holds. A new key starts with
+    an empty list.
+    """
+
+    def get_roles(self) -> list[SharedKeyRole] | None:
+        """Return the owner roles granted to the key, or None for a key that has every role that its owner holds."""
+        if self.roles is None:
+            return None
+        return [SharedKeyRole(role) for role in self.roles]
 
     @logger.catch(reraise=True)
     def get_details(self, *, include_active_usage: bool = False) -> dict[str, Any]:
@@ -260,6 +274,7 @@ class UserSharedKey(db.Model):
         Returns:
             Shared-key details ready for API serialization.
         """
+        roles = self.get_roles()
         ret_dict = {
             "username": self.user.get_unique_alias(),
             "id": self.id,
@@ -270,6 +285,7 @@ class UserSharedKey(db.Model):
             "max_image_pixels": self.max_image_pixels,
             "max_image_steps": self.max_image_steps,
             "max_text_tokens": self.max_text_tokens,
+            "roles": None if roles is None else [role.value for role in roles],
         }
         if include_active_usage:
             ret_dict["active_usage"] = asdict(self.get_active_usage())

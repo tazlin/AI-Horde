@@ -25,12 +25,14 @@ The errors returned by the AI horde are always in this json format
 
 | RC | Explanation |
 | -- | ----------- |
+| InvalidSharedKeyPolicy | A shared key's roles are malformed |
 | MissingPrompt | The generation prompt was not given |
 | CorruptPrompt | The prompts was rejected as unethical |
 | KudosValidationError | Something went wrong when transferring kudos. This is a base rc, so you should never typically see it. |
 | NoValidActions | Something went wrong when modifying an entity on the horde. This is a base rc, so you should never typically see it. |
 | InvalidSize | Requested image size is not a multiple of 64 |
 | InvalidPromptSize | Prompt is too large |
+| SharedKeyRoleNotHeld | A shared key can only be granted roles that its owner holds |
 | TooManySteps | Too many steps requested for image generation |
 | Profanity | Profanity Detected. This is a base rc, so you should never typically see it.
 | ProfaneWorkerName | Profanity detected in worker name |

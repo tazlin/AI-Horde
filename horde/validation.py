@@ -97,13 +97,17 @@ class ParamValidator:
     models: list
     params: dict
     user: User
+    key_grants_special: bool
+    """Whether the request's shared key passes the special role on. The account's role is read only when a
+    special model is requested, so other requests do not query it."""
     warnings = set()
 
-    def __init__(self, prompt, models, params, user):
+    def __init__(self, prompt: str, models: list[str], params: dict[str, Any], user: User, key_grants_special: bool = True) -> None:
         self.prompt = prompt
         self.models = models
         self.params = params
         self.user = user
+        self.key_grants_special = key_grants_special
         self.warnings = set()
 
     def validate_base_params(self):
@@ -272,7 +276,7 @@ class ParamValidator:
             raise e.BadRequest("Only special users can send a special field.", rc="SpecialFieldNeedsSpecialUser")
         for model in self.models:
             if "horde_special" in model:
-                if not self.user.special:
+                if not (self.key_grants_special and self.user.special):
                     raise e.Forbidden("Only special users can request a special model.", rc="SpecialModelNeedsSpecialUser")
                 usermodel = model.split("::")
                 if len(usermodel) == 1:

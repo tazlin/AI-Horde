@@ -7,6 +7,7 @@ from typing import Any, override
 
 from flask_restx import fields, reqparse
 
+from horde.access_control import SharedKeyRole
 from horde.classes.base.prompt_moderation import (
     MAX_NOTE_CHARACTERS,
     EvidenceHoldSource,
@@ -1207,6 +1208,18 @@ class Models:
             },
         )
 
+        sharedkey_policy_fields = {
+            "roles": fields.List(
+                fields.String(enum=[role.value for role in SharedKeyRole]),
+                required=False,
+                description=(
+                    "The roles of your account that are granted to this key. You can only grant a role that your account "
+                    "holds, and supporters hold the trusted role. Only a service account can grant the service role. A new "
+                    "key does not have any role. Your account's restrictions always apply to the key, and the moderator "
+                    "role cannot be granted."
+                ),
+            ),
+        }
         self.input_model_sharedkey = api.model(
             "SharedKeyInput",
             {
@@ -1255,6 +1268,7 @@ class Models:
                     required=False,
                     description="The maximum amount of text tokens this key can generate per job. -1 means unlimited.",
                 ),
+                **sharedkey_policy_fields,
             },
         )
 
@@ -1304,6 +1318,14 @@ class Models:
                 ),
                 "max_text_tokens": fields.Integer(
                     description="The maximum amount of text tokens this key can generate per job. -1 means unlimited.",
+                ),
+                "roles": fields.List(
+                    fields.String(enum=[role.value for role in SharedKeyRole]),
+                    allow_null=True,
+                    description=(
+                        "The owner's roles granted to this key. Null for a key created before roles existed. Such a key "
+                        "has every role in the list that its owner holds."
+                    ),
                 ),
             },
         )

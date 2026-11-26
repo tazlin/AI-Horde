@@ -1,0 +1,21 @@
+-- Run with psql in its default autocommit mode and pass -v ON_ERROR_STOP=1 so a
+-- failure stops the migration. Every statement can be run again safely.
+--
+-- Shared key policy. Every new column is nullable or has a constant default, so
+-- PostgreSQL adds it in the catalogue without rewriting user_sharedkeys. Existing
+-- keys keep NULL roles, which the application reads as a legacy key that keeps
+-- every allowance role that its owner holds, except service. New keys are created with an empty list.
+-- Apply this before deploying 6.1.0, because the new code reads these columns.
+SET lock_timeout = '3s';
+
+ALTER TABLE user_sharedkeys
+  ADD COLUMN IF NOT EXISTS roles JSONB;
+
+-- A key without a role list does not act with the service role. Each existing key of a service account gets a role
+-- list with every grantable role, so it keeps the allowances that it had before 6.1.0. The request still acts only
+-- with the roles that the owner holds. Running this again does not change anything, because it only touches NULL role lists.
+UPDATE user_sharedkeys
+SET roles = '["trusted", "education", "special", "service"]'::jsonb
+WHERE roles IS NULL
+  AND user_id IN (SELECT user_id FROM user_roles WHERE user_role = 'SERVICE' AND value);
+

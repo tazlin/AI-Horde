@@ -432,26 +432,6 @@ def _vocabulary(info: ValidationInfo) -> StyleContractVocabulary | None:
     return vocabulary
 
 
-def _validation_reasons(error: ValidationError) -> str:
-    """Return every reason a pydantic ValidationError gives, as one line for a client to read.
-
-    Args:
-        error: The error the model raised.
-
-    Returns:
-        The reasons, each prefixed with the location it applies to, separated by semicolons.
-    """
-    reasons: list[str] = []
-    for detail in error.errors():
-        # Pydantic prefixes anything a validator raised with "Value error, "; strip it so the client
-        # gets the plain reason.
-        reason = detail["msg"].removeprefix("Value error, ")
-        location = ".".join(str(part) for part in detail["loc"])
-        reasons.append(f"{location}: {reason}" if location else reason)
-
-    return "; ".join(reasons)
-
-
 def _as_bad_request(error: ValidationError, subject: str) -> NoReturn:
     """Translate a pydantic ValidationError into a horde BadRequest.
 
@@ -466,7 +446,7 @@ def _as_bad_request(error: ValidationError, subject: str) -> NoReturn:
     if any(detail["type"] == OVERRIDABLE_MISPLACED_ERROR_TYPE for detail in error.errors()):
         return_code = "StylePolicyOverridableMisplaced"
 
-    raise e.BadRequest(f"'{subject}' is not valid. {_validation_reasons(error)}.", rc=return_code)
+    raise e.BadRequest(f"'{subject}' is not valid. {e.validation_reasons(error)}.", rc=return_code)
 
 
 def _as_invalid_stored_declaration(error: ValidationError, *, subject: str, style_name: str) -> NoReturn:
@@ -484,7 +464,7 @@ def _as_invalid_stored_declaration(error: ValidationError, *, subject: str, styl
     Raises:
         horde.exceptions.BadRequest: Always, with the ``StyleDeclarationInvalid`` return code.
     """
-    reasons = _validation_reasons(error)
+    reasons = e.validation_reasons(error)
     # A stored declaration only stops validating when the rules or a params model change after the style
     # was written, so every occurrence is a style its author has to fix.
     logger.warning(f"Stored style declaration invalid: style '{style_name}' {subject}: {reasons}")

@@ -134,7 +134,6 @@ from horde.image import decode_chat_image, encode_chat_image, read_chat_image_by
 from horde.limiter import limiter
 from horde.logger import logger
 from horde.model_reference import model_reference
-from horde.patreon import patrons
 from horde.r2 import upload_chat_image, upload_chat_messages
 from horde.request_scheduling import record_request_cancellation_forecast
 from horde.utils import get_db_uuid, hash_api_key, hash_dictionary
@@ -552,7 +551,7 @@ class TextAsyncGenerate(GenerateTemplate):
         super().validate()
         self.decide_style_surcharge()
         self.report_style_application()
-        param_validator = ParamValidator(self.prompt, self.args.models, self.params, self.user)
+        param_validator = ParamValidator(self.prompt, self.args.models, self.params, user=self.user)
         self.warnings = param_validator.validate_text_params()
         if self.args.extra_source_images is not None and len(self.args.extra_source_images) > 0:
             raise e.BadRequest("This request type does not accept extra source images.", rc="InvalidExtraSourceImages")
@@ -1243,7 +1242,7 @@ class ChatAsyncGenerate(TextAsyncGenerate):
         self.apply_context_fit()
         self.decide_style_surcharge()
         self.report_style_application()
-        param_validator = ParamValidator(self.prompt, self.args.models, self.params, self.user)
+        param_validator = ParamValidator(self.prompt, self.args.models, self.params, user=self.user)
         self.warnings = param_validator.validate_text_params()
         self.load_chat_images()
         self.prepare_messages_offload()
@@ -1290,7 +1289,7 @@ class ChatAsyncGenerate(TextAsyncGenerate):
         self.chat_images = ()
         if not image_urls:
             return
-        if self.user.trusted or patrons.is_patron(self.user.id):
+        if self.principal.trusted or self.principal.is_patron:
             max_total_bytes = MAX_CHAT_IMAGE_TOTAL_BYTES
         else:
             max_total_bytes = MAX_CHAT_IMAGE_TOTAL_BYTES_UNTRUSTED

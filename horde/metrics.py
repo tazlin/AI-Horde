@@ -1157,6 +1157,13 @@ moderation_retention_saturation = logfire.metric_counter(
     description="Moderation retention ticks that used every catch-up cycle with a full final batch",
 )
 
+# --- shared key access control -----------------------------------------------
+sharedkey_legacy_requests = logfire.metric_counter(
+    "horde.sharedkey.legacy_requests",
+    unit="1",
+    description="Generation requests through a shared key without a role list",
+)
+
 # --- registration reCAPTCHA ---------------------------------------------------
 recaptcha_verifications = logfire.metric_counter(
     "horde.recaptcha.verifications",

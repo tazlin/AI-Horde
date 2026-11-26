@@ -2561,13 +2561,26 @@ THREE_MIB_DATA_URL = "data:image/png;base64," + "A" * (3 * 1024 * 1024 * 4 // 3)
 """A data URL estimated at 3 MiB decoded, so two of them pass the untrusted total and stay within the trusted one."""
 
 
-def _load_dry_run_chat_images(*, trusted: bool, image_urls: list[str]) -> None:
-    """Run the native route's image loading for a dry run on a stub request, which checks only the data URL total."""
+def _load_dry_run_chat_images(*, trusted: bool, image_urls: list[str], sharedkey_roles: list[str] | None = None) -> None:
+    """Run the native route's image loading for a dry run on a stub request, which checks only the data URL total.
+
+    Args:
+        trusted: Whether the requesting account is trusted.
+        image_urls: The image URLs of the request's messages.
+        sharedkey_roles: The roles granted to the shared key that the request is sent with, or None for a request sent
+            with the account's personal key.
+    """
+    from horde.access_control import RequestPrincipal, SharedKeyRole
     from horde.apis.v2.kobold import ChatAsyncGenerate
 
+    stub_user = SimpleNamespace(id=1, trusted=trusted)
+    stub_sharedkey = None
+    if sharedkey_roles is not None:
+        stub_sharedkey = SimpleNamespace(get_roles=lambda: [SharedKeyRole(role) for role in sharedkey_roles])
     stub_request = SimpleNamespace(
         messages=_image_messages(*image_urls),
-        user=SimpleNamespace(id=1, trusted=trusted),
+        user=stub_user,
+        principal=RequestPrincipal(user=stub_user, sharedkey=stub_sharedkey),
         args=SimpleNamespace(dry_run=True),
         chat_images=None,
     )
@@ -2592,6 +2605,18 @@ class TestImageTotalByTrust:
         monkeypatch.setattr(patrons, "is_patron", lambda user_id: True)
 
         _load_dry_run_chat_images(trusted=False, image_urls=[THREE_MIB_DATA_URL, THREE_MIB_DATA_URL])
+
+    def test_a_shared_key_without_the_trusted_role_is_held_to_the_untrusted_total(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A trusted owner's larger image total does not pass to the holders of a key unless the owner grants the role."""
+        from horde.patreon import patrons
+
+        monkeypatch.setattr(patrons, "is_patron", lambda user_id: False)
+
+        with pytest.raises(e.ImageValidationFailed) as raised:
+            _load_dry_run_chat_images(trusted=True, image_urls=[THREE_MIB_DATA_URL, THREE_MIB_DATA_URL], sharedkey_roles=[])
+
+        assert raised.value.rc == "SourceImageSizeExceeded"
+        _load_dry_run_chat_images(trusted=True, image_urls=[THREE_MIB_DATA_URL, THREE_MIB_DATA_URL], sharedkey_roles=["trusted"])
 
 
 class TestImageTransport:

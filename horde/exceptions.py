@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 from flask import has_request_context, request
+from pydantic import ValidationError
 from werkzeug import exceptions as wze
 
 from horde import metrics
@@ -232,6 +233,8 @@ KNOWN_RC = [
     "ChatProgressUnavailable",
     "ChatJobAborted",
     "NoEligibleWorker",
+    "InvalidSharedKeyPolicy",
+    "SharedKeyRoleNotHeld",
 ]
 
 
@@ -828,6 +831,26 @@ _NUL_BYTE_VALUE_ERROR_SIGNATURE = "NUL (0x00)"
 
 # PostgreSQL SQLSTATE for a detected deadlock (``psycopg2.errors.DeadlockDetected``).
 _DEADLOCK_PGCODE = "40P01"
+
+
+def validation_reasons(error: ValidationError) -> str:
+    """Return every reason a pydantic ValidationError gives, as one line for a client to read.
+
+    Args:
+        error: The error the model raised.
+
+    Returns:
+        The reasons, each prefixed with the location it applies to, separated by semicolons.
+    """
+    reasons: list[str] = []
+    for detail in error.errors():
+        # Pydantic prefixes anything a validator raised with "Value error, "; strip it so the client
+        # gets the plain reason.
+        reason = detail["msg"].removeprefix("Value error, ")
+        location = ".".join(str(part) for part in detail["loc"])
+        reasons.append(f"{location}: {reason}" if location else reason)
+
+    return "; ".join(reasons)
 
 
 def is_nul_byte_value_error(error: BaseException) -> bool:

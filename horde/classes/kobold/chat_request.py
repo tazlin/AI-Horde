@@ -986,23 +986,6 @@ def _message_text_bytes(chat_request: ChatCompletionRequest) -> int:
     return text_bytes + sum(chat_tool_call_bytes(message.tool_calls) for message in chat_request.messages)
 
 
-def _validation_reasons(error: ValidationError) -> str:
-    """Return every reason a pydantic ValidationError gives, as one line for a client to read.
-
-    Args:
-        error: The error the model raised.
-
-    Returns:
-        The reasons, each prefixed with the location it applies to, separated by semicolons.
-    """
-    reasons: list[str] = []
-    for detail in error.errors():
-        location = ".".join(str(part) for part in detail["loc"])
-        reasons.append(f"{location}: {detail['msg']}" if location else detail["msg"])
-
-    return "; ".join(reasons)
-
-
 def _validate_image_url(image_url: str) -> None:
     """Validate the form and size of one image URL without decoding or fetching it.
 
@@ -1131,10 +1114,10 @@ def parse_chat_request(request_body: object) -> ChatCompletionRequest:
         # A value outside the service contract, such as too many tools or a schema nested too deeply, keeps its code.
         if any(detail["type"] == UNSUPPORTED_CHAT_PARAMETER_ERROR_TYPE for detail in validation_error.errors()):
             raise e.BadRequest(
-                f"The chat request is not valid. {_validation_reasons(validation_error)}.",
+                f"The chat request is not valid. {e.validation_reasons(validation_error)}.",
                 rc=UNSUPPORTED_CHAT_PARAMETER_RC,
             ) from None
-        raise e.BadRequest(f"The chat request is not valid. {_validation_reasons(validation_error)}.") from None
+        raise e.BadRequest(f"The chat request is not valid. {e.validation_reasons(validation_error)}.") from None
 
     _reject_conflicting_values(chat_request)
     _reject_stored_nuls(chat_request)
